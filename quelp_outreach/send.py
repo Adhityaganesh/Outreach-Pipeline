@@ -4,8 +4,11 @@ Sends emails from ready_to_send.csv via the authenticated user's Gmail account.
 
 Three modes (safest is default):
   --dry-run   (DEFAULT) Print what would be sent; write dry_run_preview.csv. No sends.
-  --test-to   Send everything to ONE address (your own) to verify in a real inbox.
-  --live      Send to real recipients. Requires typed confirmation.
+  --test-to   Send ALL selected emails to ONE address to verify in a real inbox.
+  --live      Send to real recipients. Requires typed "SEND" confirmation.
+
+Confidence gate (default: medium — skips low-confidence role-email guesses):
+  --min-confidence {high,medium,low}
 """
 
 import argparse
@@ -42,11 +45,13 @@ from config import (
 # Constants
 # ---------------------------------------------------------------------------
 
-_SCOPES        = ["https://www.googleapis.com/auth/gmail.send"]
-_SENT_LOG      = DATA_DIR / "sent_log.csv"
-_DRY_RUN_FILE  = DATA_DIR / "dry_run_preview.csv"
+_SCOPES       = ["https://www.googleapis.com/auth/gmail.send"]
+_SENT_LOG     = DATA_DIR / "sent_log.csv"
+_DRY_RUN_FILE = DATA_DIR / "dry_run_preview.csv"
 
-# Client-secrets dict built from env vars — no secrets file on disk needed.
+_CONFIDENCE_RANK = {"high": 2, "medium": 1, "low": 0}
+
+# Client-secrets dict built from env vars — no secrets file needed on disk.
 _CLIENT_CONFIG = {
     "installed": {
         "client_id":     GOOGLE_CLIENT_ID,
@@ -84,7 +89,6 @@ def _get_gmail_service():
         else:
             flow = InstalledAppFlow.from_client_config(_CLIENT_CONFIG, _SCOPES)
             creds = flow.run_local_server(port=0)
-        # Persist token for next run
         GMAIL_TOKEN_PATH.write_text(creds.to_json())
 
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
@@ -98,20 +102,23 @@ def _build_mime(to: str, subject: str, body: str) -> str:
     """Return a base64url-encoded RFC 2822 message string."""
     msg = MIMEText(body, "plain", "utf-8")
     msg["to"]      = to
+    msg["from"]    = f"{SENDER_NAME} <me>"   # Gmail replaces <me> with authed address
     msg["subject"] = subject
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    return raw
+    return base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
 
 # ---------------------------------------------------------------------------
 # Sent-log helpers
 # ---------------------------------------------------------------------------
 
-_LOG_FIELDS = ["email", "company", "sent_at", "gmail_message_id", "thread_id", "status"]
+_LOG_FIELDS = [
+    "email", "company", "name", "confidence",
+    "sent_at", "gmail_message_id", "thread_id", "status",
+]
 
 
 def _load_sent_emails() -> set[str]:
-    """Return the set of email addresses already logged as sent."""
+    """Return the set of email addresses already in sent_log."""
     if not _SENT_LOG.exists():
         return set()
     df = pd.read_csv(_SENT_LOG)
@@ -121,6 +128,8 @@ def _load_sent_emails() -> set[str]:
 def _log_send(
     email: str,
     company: str,
+    name: str,
+    confidence: str,
     gmail_message_id: str,
     thread_id: str,
     status: str,
@@ -135,6 +144,8 @@ def _log_send(
         writer.writerow({
             "email":            email,
             "company":          company,
+            "name":             name,
+            "confidence":       confidence,
             "sent_at":          datetime.now(timezone.utc).isoformat(),
             "gmail_message_id": gmail_message_id,
             "thread_id":        thread_id,
@@ -143,14 +154,57 @@ def _log_send(
 
 
 # ---------------------------------------------------------------------------
-# Core send logic
+# Queue loading + confidence gate
+# ---------------------------------------------------------------------------
+
+def _load_queue(in_path: Path, min_confidence: str) -> pd.DataFrame:
+    """
+    Load ready_to_send.csv, validate columns, apply confidence gate.
+    If the CSV has no 'confidence' column (pre-Block-3 file), treats all
+    rows as 'low' so --min-confidence medium/high correctly skips them.
+    """
+    required = {"best_email", "subject", "body"}
+    df = pd.read_csv(in_path)
+    missing = required - set(df.columns)
+    if missing:
+        sys.exit(f"Input CSV missing columns: {missing}")
+
+    df = df.dropna(subset=["best_email", "subject", "body"])
+    df = df[df["best_email"].str.strip() != ""]
+
+    # Normalise confidence column — default to "low" if absent
+    if "confidence" not in df.columns:
+        df["confidence"] = "low"
+    df["confidence"] = df["confidence"].fillna("low").str.strip().str.lower()
+    df["confidence"] = df["confidence"].apply(
+        lambda v: v if v in _CONFIDENCE_RANK else "low"
+    )
+
+    # Normalise name column
+    if "name" not in df.columns:
+        df["name"] = ""
+    df["name"] = df["name"].fillna("")
+
+    # Apply confidence gate
+    threshold = _CONFIDENCE_RANK[min_confidence]
+    before = len(df)
+    df = df[df["confidence"].map(_CONFIDENCE_RANK) >= threshold]
+    filtered = before - len(df)
+    if filtered:
+        print(
+            f"  Confidence gate ({min_confidence}+): {filtered} row(s) skipped "
+            f"(below threshold), {len(df)} remain."
+        )
+
+    return df.reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Core send
 # ---------------------------------------------------------------------------
 
 def _send_one(service, to: str, subject: str, body: str) -> tuple[str, str]:
-    """
-    Send a single email. Returns (message_id, thread_id).
-    Raises HttpError on failure.
-    """
+    """Send a single email. Returns (message_id, thread_id)."""
     raw = _build_mime(to, subject, body)
     result = service.users().messages().send(
         userId="me", body={"raw": raw}
@@ -158,95 +212,101 @@ def _send_one(service, to: str, subject: str, body: str) -> tuple[str, str]:
     return result.get("id", ""), result.get("threadId", "")
 
 
-def _load_queue(in_path: Path) -> pd.DataFrame:
-    """Load ready_to_send.csv and validate required columns."""
-    required = {"best_email", "subject", "body"}
-    df = pd.read_csv(in_path)
-    missing = required - set(df.columns)
-    if missing:
-        sys.exit(f"Input CSV missing columns: {missing}")
-    df = df.dropna(subset=["best_email", "subject", "body"])
-    df = df[df["best_email"].str.strip() != ""]
-    return df
-
-
 # ---------------------------------------------------------------------------
-# Modes
+# Mode: dry-run
 # ---------------------------------------------------------------------------
 
-def run_dry_run(in_path: Path) -> None:
-    df = _load_queue(in_path)
+def run_dry_run(in_path: Path, min_confidence: str, cap: int) -> None:
+    df = _load_queue(in_path, min_confidence)
     already_sent = _load_sent_emails()
 
     preview_rows = []
     print(f"\n{'='*65}")
     print(f"DRY RUN — nothing will be sent")
+    print(f"Min confidence: {min_confidence}  |  Cap: {cap}")
     print(f"{'='*65}\n")
 
     for _, row in df.iterrows():
-        to      = str(row["best_email"]).strip().lower()
-        subject = str(row["subject"])
-        body    = str(row["body"])
-        company = str(row.get("company", row.get("domain", "")))
+        to         = str(row["best_email"]).strip().lower()
+        subject    = str(row["subject"])
+        body       = str(row["body"])
+        company    = str(row.get("company", row.get("domain", "")))
+        name       = str(row.get("name", ""))
+        confidence = str(row.get("confidence", "low"))
         body_preview = "\n".join(body.splitlines()[:3])
 
         skipped = to in already_sent
         tag = "[SKIP — already sent]" if skipped else "[WOULD SEND]"
 
-        print(f"{tag}")
-        print(f"  To     : {to}")
-        print(f"  Subject: {subject}")
-        print(f"  Body   :\n    " + body_preview.replace("\n", "\n    "))
+        print(f"{tag}  confidence={confidence}")
+        print(f"  To      : {to}" + (f"  ({name})" if name else ""))
+        print(f"  Company : {company}")
+        print(f"  Subject : {subject}")
+        print(f"  Body    :\n    " + body_preview.replace("\n", "\n    "))
         print()
 
         preview_rows.append({
-            "to": to, "company": company,
-            "subject": subject, "body_preview": body_preview,
-            "would_skip": skipped,
+            "to":           to,
+            "company":      company,
+            "name":         name,
+            "confidence":   confidence,
+            "subject":      subject,
+            "body_preview": body_preview,
+            "would_skip":   skipped,
         })
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(preview_rows).to_csv(_DRY_RUN_FILE, index=False)
-    send_count  = sum(1 for r in preview_rows if not r["would_skip"])
-    skip_count  = len(preview_rows) - send_count
-    capped      = max(0, send_count - DAILY_SEND_CAP)
+
+    send_count = sum(1 for r in preview_rows if not r["would_skip"])
+    skip_count = len(preview_rows) - send_count
+    capped     = max(0, send_count - cap)
+
+    print(f"{'='*65}")
     print(f"Summary: {send_count} would send, {skip_count} already sent, "
-          f"{capped} would be held by cap ({DAILY_SEND_CAP}/run).")
+          f"{capped} would be held by daily cap ({cap}/run).")
     print(f"Preview written to {_DRY_RUN_FILE}")
 
 
-def run_test_send(in_path: Path, test_to: str, cap: int) -> None:
-    df = _load_queue(in_path)
+# ---------------------------------------------------------------------------
+# Mode: test-to
+# ---------------------------------------------------------------------------
+
+def run_test_send(in_path: Path, test_to: str, min_confidence: str, cap: int) -> None:
+    df = _load_queue(in_path, min_confidence)
     service = _get_gmail_service()
     sent = 0
 
     print(f"\n{'='*65}")
     print(f"TEST SEND — all emails redirected to: {test_to}")
-    print(f"Cap: {cap}  |  Delay: {SEND_DELAY_MIN:.0f}–{SEND_DELAY_MAX:.0f}s")
+    print(f"Min confidence: {min_confidence}  |  Cap: {cap}  |  Delay: {SEND_DELAY_MIN:.0f}–{SEND_DELAY_MAX:.0f}s")
     print(f"{'='*65}\n")
 
-    for _, row in df.iterrows():
+    for idx, row in df.iterrows():
         if sent >= cap:
             remaining = len(df) - sent
-            print(f"\nCap of {cap} reached. {remaining} emails not sent this run.")
+            print(f"\nCap of {cap} reached. {remaining} email(s) not sent this run.")
             break
 
-        subject = str(row["subject"])
-        body    = str(row["body"])
-        company = str(row.get("company", row.get("domain", "")))
-        orig_to = str(row["best_email"]).strip().lower()
+        subject    = str(row["subject"])
+        body       = str(row["body"])
+        company    = str(row.get("company", row.get("domain", "")))
+        name       = str(row.get("name", ""))
+        confidence = str(row.get("confidence", "low"))
+        orig_to    = str(row["best_email"]).strip().lower()
 
-        print(f"[{sent+1}/{cap}] Sending (orig: {orig_to}) → {test_to}")
+        print(f"[{sent+1}/{cap}] orig={orig_to}  conf={confidence} → {test_to}")
         try:
             msg_id, thread_id = _send_one(service, test_to, subject, body)
-            _log_send(test_to, company, msg_id, thread_id, "test")
-            print(f"  OK — message_id={msg_id}")
+            _log_send(test_to, company, name, confidence, msg_id, thread_id, "test")
+            print(f"  OK  message_id={msg_id}")
             sent += 1
         except HttpError as e:
             print(f"  ERROR — {e}")
-            _log_send(test_to, company, "", "", f"error: {e}")
+            _log_send(test_to, company, name, confidence, "", "", f"error: {e}")
 
-        if sent < cap and _ < len(df) - 1:
+        is_last = (idx == df.index[-1]) or (sent >= cap)
+        if not is_last:
             delay = random.uniform(SEND_DELAY_MIN, SEND_DELAY_MAX)
             print(f"  Waiting {delay:.0f}s…")
             time.sleep(delay)
@@ -254,26 +314,37 @@ def run_test_send(in_path: Path, test_to: str, cap: int) -> None:
     print(f"\nTest send done. {sent} sent to {test_to}. Log: {_SENT_LOG}")
 
 
-def run_live(in_path: Path, cap: int) -> None:
-    df = _load_queue(in_path)
-    already_sent = _load_sent_emails()
-    queue = [row for _, row in df.iterrows()
-             if str(row["best_email"]).strip().lower() not in already_sent]
+# ---------------------------------------------------------------------------
+# Mode: live
+# ---------------------------------------------------------------------------
 
+def run_live(in_path: Path, min_confidence: str, cap: int) -> None:
+    df = _load_queue(in_path, min_confidence)
+    already_sent = _load_sent_emails()
+
+    queue = [
+        row for _, row in df.iterrows()
+        if str(row["best_email"]).strip().lower() not in already_sent
+    ]
     to_send = min(len(queue), cap)
+
     print(f"\n{'='*65}")
     print(f"LIVE SEND")
-    print(f"  Queue : {len(queue)} unsent  |  Cap: {cap}  |  Will send: {to_send}")
-    print(f"  Delay : {SEND_DELAY_MIN:.0f}–{SEND_DELAY_MAX:.0f}s between emails")
+    print(f"  Queue  : {len(queue)} unsent  |  Cap: {cap}  |  Will send: {to_send}")
+    print(f"  Conf   : {min_confidence}+")
+    print(f"  Delay  : {SEND_DELAY_MIN:.0f}–{SEND_DELAY_MAX:.0f}s between emails")
     print(f"{'='*65}")
 
     if to_send == 0:
         print("Nothing to send (queue empty or all already sent).")
         return
 
-    print("\nEmails that WILL be sent:")
+    print("\nEmails that WILL be sent to real recipients:")
     for i, row in enumerate(queue[:to_send], 1):
-        print(f"  {i}. {row['best_email']}  —  {row['subject']}")
+        conf = str(row.get("confidence", "low"))
+        name = str(row.get("name", ""))
+        label = f"  ({name})" if name else ""
+        print(f"  {i}. {row['best_email']}{label}  [{conf}]  —  {row['subject']}")
 
     print()
     confirm = input("Type SEND to confirm, anything else to abort: ").strip()
@@ -284,23 +355,26 @@ def run_live(in_path: Path, cap: int) -> None:
     service = _get_gmail_service()
     sent = 0
 
-    for row in queue[:to_send]:
-        to      = str(row["best_email"]).strip().lower()
-        subject = str(row["subject"])
-        body    = str(row["body"])
-        company = str(row.get("company", row.get("domain", "")))
+    for i, row in enumerate(queue[:to_send]):
+        to         = str(row["best_email"]).strip().lower()
+        subject    = str(row["subject"])
+        body       = str(row["body"])
+        company    = str(row.get("company", row.get("domain", "")))
+        name       = str(row.get("name", ""))
+        confidence = str(row.get("confidence", "low"))
 
-        print(f"[{sent+1}/{to_send}] → {to}")
+        print(f"[{sent+1}/{to_send}] → {to}  conf={confidence}")
         try:
             msg_id, thread_id = _send_one(service, to, subject, body)
-            _log_send(to, company, msg_id, thread_id, "sent")
-            print(f"  OK — message_id={msg_id}")
+            _log_send(to, company, name, confidence, msg_id, thread_id, "sent")
+            print(f"  OK  message_id={msg_id}")
             sent += 1
         except HttpError as e:
             print(f"  ERROR — {e}")
-            _log_send(to, company, "", "", f"error: {e}")
+            _log_send(to, company, name, confidence, "", "", f"error: {e}")
 
-        if sent < to_send:
+        is_last = (i == to_send - 1)
+        if not is_last:
             delay = random.uniform(SEND_DELAY_MIN, SEND_DELAY_MAX)
             print(f"  Waiting {delay:.0f}s…")
             time.sleep(delay)
@@ -329,19 +403,24 @@ def main() -> None:
         "--cap", type=int, default=DAILY_SEND_CAP, metavar="N",
         help=f"Max emails to send this run (default: {DAILY_SEND_CAP})",
     )
+    parser.add_argument(
+        "--min-confidence", dest="min_confidence",
+        choices=["high", "medium", "low"], default="medium",
+        help="Minimum confidence level to include (default: medium).",
+    )
 
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
-        "--dry-run", dest="dry_run", action="store_true", default=True,
+        "--dry-run", dest="dry_run", action="store_true",
         help="(DEFAULT) Print what would be sent; no emails go out.",
     )
     mode.add_argument(
         "--test-to", dest="test_to", metavar="EMAIL",
-        help="Send all emails to this address (your own) for inbox preview.",
+        help="Send all selected emails to this address for inbox preview.",
     )
     mode.add_argument(
         "--live", action="store_true",
-        help="Send to real recipients. Requires typed confirmation.",
+        help="Send to real recipients. Requires typed SEND confirmation.",
     )
 
     args = parser.parse_args()
@@ -351,11 +430,12 @@ def main() -> None:
         sys.exit(f"Input file not found: {in_path}")
 
     if args.test_to:
-        run_test_send(in_path, args.test_to, args.cap)
+        run_test_send(in_path, args.test_to, args.min_confidence, args.cap)
     elif args.live:
-        run_live(in_path, args.cap)
+        run_live(in_path, args.min_confidence, args.cap)
     else:
-        run_dry_run(in_path)
+        # Default: dry-run (covers both --dry-run flag and no flag at all)
+        run_dry_run(in_path, args.min_confidence, args.cap)
 
 
 if __name__ == "__main__":
