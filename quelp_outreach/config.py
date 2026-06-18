@@ -14,9 +14,11 @@ HUNTER_KEY         = os.getenv("HUNTER_KEY", "")
 GETPROSPECT_KEY    = os.getenv("GETPROSPECT_KEY", "")
 TOMBA_KEY          = os.getenv("TOMBA_KEY", "")
 TOMBA_SECRET       = os.getenv("TOMBA_SECRET", "")
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN", "")
+APOLLO_API_KEY       = os.getenv("APOLLO_API_KEY", "")
+MAX_EMPLOYEES        = int(os.getenv("MAX_EMPLOYEES", "15"))
 
 # Token file for Gmail OAuth (gitignored)
 GMAIL_TOKEN_PATH = BASE_DIR / "token.json"

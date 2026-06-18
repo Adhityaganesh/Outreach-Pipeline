@@ -166,8 +166,10 @@ def _extract_real_emails(html: str, domain: str) -> list[str]:
             found.append(email)
 
     def _keep(e: str) -> bool:
-        _, _, d = e.partition("@")
+        local, _, d = e.partition("@")
         if d in _JUNK_DOMAINS:
+            return False
+        if local in _JUNK_LOCALS:
             return False
         return d == domain or d.endswith("." + domain)
 
@@ -190,6 +192,22 @@ def _groq() -> Groq:
 _FOUNDER_ROLES = {"founder", "co-founder", "cofounder", "ceo", "cto", "coo",
                   "head", "director", "vp", "president", "chief", "owner",
                   "managing director", "md"}
+
+# Large well-known companies that slip through MX/helpdesk gate — skip them
+_COMPANY_BLOCKLIST = {
+    "databricks.com", "sysdig.com", "builtin.com", "seekout.com",
+    "startree.ai", "obviously.ai", "rafay.co", "ushur.com",
+    "uplandsoftware.com", "saasinsider.com",
+}
+
+# Email local-parts that are service pages, not people
+_JUNK_LOCALS = {
+    "alexa", "google", "iot", "big", "data", "generative", "business",
+    "reinventing", "cumulations", "android", "ios", "web", "mobile",
+    "blockchain", "cloud", "ar", "vr", "ml", "ai", "react", "flutter",
+    "wordpress", "shopify", "magento", "sap", "oracle", "microsoft",
+    "salesforce", "hubspot", "zoho", "freshdesk", "zendesk",
+}
 
 
 def _groq_parse_people(html_snippets: list[str], domain: str) -> list[dict]:
@@ -704,17 +722,46 @@ def cmd_enrich(in_path: Path, out_path: Path) -> None:
     t0 = time.time()
     all_results = asyncio.run(_batch_enrich(rows))
 
-    # Flatten: one row per contact (multiple per domain if multiple founders found)
+    # Flatten: ONE contact per domain (best ranked person)
     out_rows: list[dict] = []
-    # Carry over all original columns from input
-    original_cols = list(df.columns)
     domain_to_input = {str(r.get("domain","")).strip().lower(): r for r in rows}
 
+    _ROLE_PRIORITY = ["founder", "co-founder", "cofounder", "ceo", "cto",
+                      "coo", "owner", "president", "managing director", "md",
+                      "director", "vp", "head"]
+
+    def _role_rank(contact: dict) -> int:
+        role = contact.get("role", "").lower()
+        for i, kw in enumerate(_ROLE_PRIORITY):
+            if kw in role:
+                return i
+        return 99
+
     for contacts in all_results:
-        for c in contacts:
-            base = dict(domain_to_input.get(c["domain"], {}))
-            base.update(c)
-            out_rows.append(base)
+        if not contacts:
+            continue
+        domain = contacts[0].get("domain", "")
+
+        # Skip known large/irrelevant companies
+        if domain in _COMPANY_BLOCKLIST:
+            print(f"  [skip] {domain} — in company blocklist")
+            continue
+
+        # Filter out contacts with junk email locals
+        valid = [
+            c for c in contacts
+            if c.get("best_email", "").split("@")[0] not in _JUNK_LOCALS
+        ]
+        if not valid:
+            continue
+
+        # Pick the single best contact — highest role rank, then highest confidence
+        conf_rank = {"high": 0, "medium": 1, "low": 2}
+        best = sorted(valid, key=lambda c: (_role_rank(c), conf_rank.get(c.get("confidence","low"), 2)))[0]
+
+        base = dict(domain_to_input.get(best["domain"], {}))
+        base.update(best)
+        out_rows.append(base)
 
     out_df = pd.DataFrame(out_rows)
     # Ensure output columns are ordered nicely

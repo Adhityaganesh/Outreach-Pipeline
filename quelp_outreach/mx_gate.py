@@ -10,9 +10,10 @@ import sys
 from pathlib import Path
 
 import dns.resolver
+import httpx
 import pandas as pd
 
-from config import CACHE_DB, DATA_DIR, DNS_TIMEOUT_SECONDS
+from config import APOLLO_API_KEY, CACHE_DB, DATA_DIR, DNS_TIMEOUT_SECONDS, MAX_EMPLOYEES
 
 # ---------------------------------------------------------------------------
 # Cache helpers
@@ -168,6 +169,87 @@ def _detect_uncached(domain: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Employee size gate — Apollo enrichment
+# ---------------------------------------------------------------------------
+
+def _init_size_cache(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS size_cache (
+            domain TEXT PRIMARY KEY,
+            employee_count INTEGER,
+            cached_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    conn.commit()
+
+
+def _apollo_employee_count(domain: str) -> int | None:
+    """
+    Return employee count for domain via Apollo's organizations/enrich endpoint.
+    Caches result in SQLite for 30 days — each domain costs 1 Apollo credit,
+    but only on first lookup. Re-runs are free.
+    Returns None if key missing, domain not found, or request fails.
+    """
+    if not APOLLO_API_KEY:
+        return None
+
+    conn = _get_conn()
+    _init_size_cache(conn)
+
+    # Check cache first (valid for 30 days)
+    row = conn.execute("""
+        SELECT employee_count FROM size_cache
+        WHERE domain = ?
+        AND cached_at > datetime('now', '-30 days')
+    """, (domain,)).fetchone()
+
+    if row is not None:
+        conn.close()
+        return row[0]  # may be None if we cached a "not found"
+
+    # Cache miss — hit Apollo (costs 1 credit)
+    count = None
+    try:
+        resp = httpx.post(
+            "https://api.apollo.io/v1/organizations/enrich",
+            json={"domain": domain},
+            headers={
+                "x-api-key": APOLLO_API_KEY,
+                "Content-Type": "application/json",
+            },
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            org = resp.json().get("organization") or {}
+            raw = org.get("estimated_num_employees") or org.get("num_employees")
+            count = int(raw) if raw is not None else None
+    except Exception:
+        pass
+
+    # Cache the result (including None = not found, so we don't retry)
+    conn.execute(
+        "INSERT OR REPLACE INTO size_cache (domain, employee_count) VALUES (?, ?)",
+        (domain, count),
+    )
+    conn.commit()
+    conn.close()
+    return count
+
+
+def passes_size_gate(domain: str, max_employees: int) -> tuple[bool, int | None]:
+    """
+    Returns (passes, employee_count).
+    Passes if: Apollo key not set (skip gate), count unknown, or count <= max.
+    """
+    if not APOLLO_API_KEY:
+        return True, None
+    count = _apollo_employee_count(domain)
+    if count is None:
+        return True, None   # can't determine size — let it through
+    return count <= max_employees, count
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -209,22 +291,55 @@ def cmd_test() -> None:
         print("One or more mismatches — review above.")
 
 
-def cmd_filter(in_path: Path, out_path: Path) -> None:
+def cmd_filter(in_path: Path, out_path: Path, max_employees: int) -> None:
     df = pd.read_csv(in_path)
     if "domain" not in df.columns:
         sys.exit("Input CSV must have a 'domain' column.")
 
-    providers = []
-    for domain in df["domain"].astype(str):
-        providers.append(detect_provider(domain))
-    df["provider"] = providers
+    size_gate_active = bool(APOLLO_API_KEY)
+    if size_gate_active:
+        print(f"Employee size gate active (max {max_employees}). Apollo key found.")
+    else:
+        print("No APOLLO_API_KEY set — employee size gate skipped.")
 
-    passed = df[df["provider"] == "google"]
+    providers    = []
+    emp_counts   = []
+    size_results = []
+
+    for domain in df["domain"].astype(str):
+        provider = detect_provider(domain)
+        providers.append(provider)
+
+        if provider == "google":
+            passes, count = passes_size_gate(domain, max_employees)
+            emp_counts.append(count)
+            size_results.append(passes)
+            status = f"google ✓  employees={count if count is not None else '?'}"
+            if not passes:
+                status += f" > {max_employees} — DROPPED"
+        else:
+            emp_counts.append(None)
+            size_results.append(False)
+            status = provider
+
+        print(f"  {domain:<40} {status}")
+
+    df["provider"]       = providers
+    df["employee_count"] = emp_counts
+
+    passed = df[
+        (df["provider"] == "google") &
+        pd.Series([bool(r) for r in size_results], index=df.index)
+    ]
     passed.to_csv(out_path, index=False)
+
+    mx_passed   = sum(1 for p in providers if p == "google")
+    size_dropped = mx_passed - len(passed)
     print(
-        f"Processed {len(df)} rows. "
-        f"{len(passed)} passed (Google Workspace). "
-        f"Written to {out_path}"
+        f"\nProcessed {len(df)} rows. "
+        f"{mx_passed} passed MX gate. "
+        f"{size_dropped} dropped by size gate. "
+        f"{len(passed)} written to {out_path}"
     )
 
 
@@ -241,7 +356,7 @@ def main() -> None:
     else:
         if not args.outfile:
             sys.exit("--out is required when using --in")
-        cmd_filter(Path(args.infile), Path(args.outfile))
+        cmd_filter(Path(args.infile), Path(args.outfile), MAX_EMPLOYEES)
 
 
 if __name__ == "__main__":

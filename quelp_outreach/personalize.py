@@ -199,6 +199,7 @@ def _first_name(email: str) -> str:
         "founder", "hello", "support", "contact", "team", "info",
         "care", "sales", "contactus", "jobs", "careers", "hr",
         "billing", "noreply", "no-reply", "admin", "help",
+        "dr", "mr", "ms", "mrs",
     }
     local = email.split("@")[0].lower()
     if local in _ROLE_PREFIXES:
@@ -235,7 +236,14 @@ def assemble_email(row: dict, opener: str) -> tuple[str, str]:
     """
     best_email   = str(row.get("best_email", ""))
     company      = str(row.get("company", row.get("domain", "your company")))
-    first_name   = _first_name(best_email)
+
+    # Prefer name field from enrichment — strip salutations first
+    _SALUTATIONS = re.compile(r"^(Dr\.?|Mr\.?|Mrs\.?|Ms\.?|Prof\.?)\s+", re.I)
+    full_name = _SALUTATIONS.sub("", str(row.get("name", ""))).strip()
+    if full_name:
+        first_name = full_name.split()[0].capitalize()
+    else:
+        first_name = _first_name(best_email)
 
     subject = _SUBJECT_TEMPLATE.format(company=company)
     body    = _EMAIL_TEMPLATE.format(

@@ -58,7 +58,7 @@ _CLIENT_CONFIG = {
         "client_secret": GOOGLE_CLIENT_SECRET,
         "auth_uri":      "https://accounts.google.com/o/oauth2/auth",
         "token_uri":     "https://oauth2.googleapis.com/token",
-        "redirect_uris": ["http://localhost"],
+        "redirect_uris": ["http://localhost:8080"],
     }
 }
 
@@ -88,7 +88,7 @@ def _get_gmail_service():
             creds.refresh(Request())
         else:
             flow = InstalledAppFlow.from_client_config(_CLIENT_CONFIG, _SCOPES)
-            creds = flow.run_local_server(port=0)
+            creds = flow.run_local_server(port=8080, access_type="offline", prompt="consent")
         GMAIL_TOKEN_PATH.write_text(creds.to_json())
 
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
