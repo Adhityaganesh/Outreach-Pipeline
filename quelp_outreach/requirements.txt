@@ -1,0 +1,8 @@
+dnspython
+httpx
+beautifulsoup4
+pandas
+python-dotenv
+google-api-python-client
+google-auth-oauthlib
+groq

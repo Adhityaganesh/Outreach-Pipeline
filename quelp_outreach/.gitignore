@@ -1,0 +1,7 @@
+.env
+token.json
+cache.sqlite
+data/
+__pycache__/
+*.pyc
+venv/
