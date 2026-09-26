@@ -41,3 +41,13 @@ FOLLOWUP_DAYS        = int(os.getenv("FOLLOWUP_DAYS", "3"))
 
 # Suppression list: one email or @domain per line. Never emailed again.
 SUPPRESS_PATH        = DATA_DIR / "suppress.txt"
+
+# Lead finding (find_emails.py): Prospeo search → guess → Clearout verify
+PROSPEO_API_KEY      = os.getenv("PROSPEO_API_KEY", "")
+CLEAROUT_API_KEY     = os.getenv("CLEAROUT_API_KEY", "")
+# Base URL can differ by account region — see Clearout → Developer → Reference
+CLEAROUT_BASE_URL    = os.getenv("CLEAROUT_BASE_URL", "https://api.clearout.io/v2").rstrip("/")
+# Hard ceiling on Clearout credits spent per find_emails.py run
+CLEAROUT_CREDIT_CAP  = int(os.getenv("CLEAROUT_CREDIT_CAP", "50"))
+# Guess order, tried until one verifies (max 3 per person by default)
+GUESS_PATTERNS       = os.getenv("GUESS_PATTERNS", "first.last,first,firstlast")

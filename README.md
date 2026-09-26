@@ -60,6 +60,34 @@ the *current* subject, so old campaigns never get a mismatched nudge.
 
 ---
 
+## Find emails cheaply (Prospeo + Clearout)
+
+No lead list yet? `find_emails.py` builds one without paying for email reveals:
+
+1. **Prospeo search only** — names, titles and company domains (1 credit per page of 25, no reveals).
+   Filters live in `prospeo_filters.json` (default: sales leaders, AEs, SEs at 21–200 employees).
+2. **Free checks first** — no MX record, free-mail domain, suppressed, already contacted, or a
+   company already known to be catch-all → skipped without spending anything.
+3. **Guess + verify** — up to 3 guesses (`first.last@`, `first@`, `firstlast@`) checked with
+   Clearout (1 credit each, 0 for "unknown"), stopping at the first valid one. Once a pattern
+   works at a company it's tried first for everyone else there.
+4. **Catch-all** — the first catch-all result marks the whole company; nobody else there costs a credit.
+5. **Optional `--finder`** — Clearout Email Finder (4 credits per hit) when guesses fail.
+
+```bash
+cd quelp_outreach
+python find_emails.py --test                          # free: checks your Clearout key with test addresses
+python find_emails.py --prospeo --pages 2             # plan only: balances + cost ceiling, nothing spent
+python find_emails.py --prospeo --pages 2 --live      # search + verify (Clearout capped at 50 credits/run)
+python find_emails.py --in people.csv --live          # or your own CSV with names + company domains
+python list_send.py --in data/leads_found.csv         # then preview the emails as usual
+```
+
+Every Clearout result, Prospeo page, company pattern and catch-all flag is cached in
+`cache.sqlite`, so re-running never pays twice. Results merge into `data/leads_found.csv`.
+
+---
+
 ## Setup
 
 ### 1. Clone & create virtualenv
@@ -89,6 +117,10 @@ cp .env.example .env
 | `SEND_DELAY_MIN` / `SEND_DELAY_MAX` | Random gap between sends in seconds (default: 40–90) |
 | `FOLLOWUP_DAYS` | Days of silence before the follow-up (default: 3) |
 | `MIN_EMPLOYEES` / `MAX_EMPLOYEES` | Size gate for `list_send.py` (default: 20–200) |
+| `PROSPEO_API_KEY` / `CLEAROUT_API_KEY` | Lead finding (`find_emails.py`) |
+| `CLEAROUT_BASE_URL` | Region-specific; see Clearout → Developer → Reference |
+| `CLEAROUT_CREDIT_CAP` | Max Clearout credits per `find_emails.py` run (default: 50) |
+| `GUESS_PATTERNS` | Email guess order (default: `first.last,first,firstlast`) |
 | `APIFY_TOKEN`, `APOLLO_API_KEY`, `HUNTER_KEY`, … | Legacy Blocks 0–3 only |
 
 ### 3. Gmail OAuth
@@ -171,9 +203,11 @@ All send scripts support three modes:
 ## Data Flow
 
 ```
-leads.csv  →  list_send.py  →  sent_log.csv  →  followup.py
-                  ↓                                  ↓
-            preview.csv                     suppress.txt (bounces, opt-outs)
+prospeo search → find_emails.py → leads_found.csv
+                                        ↓  (or any leads.csv)
+                                  list_send.py  →  sent_log.csv  →  followup.py
+                                        ↓                                  ↓
+                                  preview.csv                     suppress.txt (bounces, opt-outs)
 
 legacy:  raw_companies.csv → mx_passed.csv → helpdesk_passed.csv
            → enriched.csv → ready_to_send.csv → send.py → sent_log.csv

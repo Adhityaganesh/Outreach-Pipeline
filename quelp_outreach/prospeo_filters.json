@@ -1,0 +1,26 @@
+{
+  "_about": "Default ICP: sales leaders, AEs and SEs at 20-200 person companies. Keys starting with _ are notes and are not sent.",
+  "_location": "To limit by HQ country, add: \"company_location_search\": {\"include\": [\"India\"]} — values must match Prospeo's dashboard / Search Suggestions API exactly.",
+  "_industry": "To limit by industry, add \"company_industry\": {\"include\": [...]} using values from prospeo.io/api-docs/enum-industries or the dashboard's Search API export.",
+  "person_job_title": {
+    "include": [
+      "Head of Sales",
+      "VP Sales",
+      "VP of Sales",
+      "Vice President of Sales",
+      "Sales Director",
+      "Director of Sales",
+      "Chief Revenue Officer",
+      "Sales Manager",
+      "Account Executive",
+      "Sales Engineer",
+      "Solutions Engineer",
+      "Solutions Consultant",
+      "Presales"
+    ],
+    "exclude": ["Intern", "Assistant", "Recruiter"],
+    "match_mode": "CONTAINS"
+  },
+  "company_headcount_range": ["21-50", "51-100", "101-200"],
+  "max_person_per_company": 2
+}
