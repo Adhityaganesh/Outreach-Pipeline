@@ -76,6 +76,8 @@ python inbox.py list       # connected? sent today / cap
   counting against that inbox's cap.
 - `--test-to` sends at least one sample from every inbox — check each lands in the inbox, not spam.
 - A Gmail rate-limit on one inbox pauses only that inbox for the run.
+- `--from-inbox ADDRESS` restricts a run to one inbox — needed for per-domain spam tests,
+  since mail-tester issues a new address per test.
 - More inboxes spread per-mailbox load, **not** domain reputation — keep totals modest while the domain is new.
 
 No `INBOXES` set = the original single-account behaviour with `token.json`.

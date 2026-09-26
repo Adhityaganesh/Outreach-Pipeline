@@ -39,7 +39,8 @@ from config import (
     SEND_DELAY_MAX,
     SEND_DELAY_MIN,
 )
-from gmail_auth import InboxNotConnected, get_gmail_service, send_email, sender_address
+from gmail_auth import (InboxNotConnected, get_gmail_service, send_email,
+                        sender_address, token_path)
 from inboxes import Inbox, assign, configured
 from inboxes import summary as inbox_summary
 from leads import load_leads
@@ -315,6 +316,9 @@ def main() -> None:
     m.add_argument("--test-to", metavar="EMAIL", help="Send a few samples to this address")
     m.add_argument("--live", action="store_true", help="Send for real (asks for SEND)")
     p.add_argument("--samples", type=int, default=3, help="--test-to: how many (default 3, min 1 per inbox)")
+    p.add_argument("--from-inbox", metavar="ADDRESS",
+                   help="Use only this inbox. Needed for per-domain spam tests: "
+                        "mail-tester issues a new address per test, so send one sample per domain.")
     a = p.parse_args()
 
     path = Path(a.infile).expanduser()
@@ -327,6 +331,16 @@ def main() -> None:
         return
 
     inboxes = configured(a.cap)
+    if a.from_inbox:
+        want = a.from_inbox.strip().lower()
+        match = [ib for ib in inboxes if ib.address == want]
+        if not match:
+            # Not in INBOXES — allowed if it has a token, so you can test an
+            # inbox that is still only warming up.
+            if not token_path(want).exists():
+                sys.exit(f"{want} is not connected. Run: python inbox.py add")
+            match = [Inbox(want, a.cap or DAILY_SEND_CAP)]
+        inboxes = match
     if a.test_to:
         run_test(df, a.test_to, a.samples, inboxes)
     elif a.live:
