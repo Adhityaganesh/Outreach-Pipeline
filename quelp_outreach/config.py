@@ -22,6 +22,10 @@ DATA_DIR = BASE_DIR / "data"
 CACHE_DB = BASE_DIR / "cache.sqlite"
 
 GROQ_API_KEY       = _env("GROQ_API_KEY", "")
+# Groq chat model for email openers. Availability varies per account — list
+# yours at https://api.groq.com/openai/v1/models. A stale id fails with 404
+# and openers silently fall back to the template line.
+GROQ_MODEL         = _env("GROQ_MODEL", "openai/gpt-oss-120b")
 SENDER_NAME        = _env("SENDER_NAME", "Adhitya")
 # Name shown in the From line, e.g. "Adhitya from Quelp" (defaults to SENDER_NAME)
 SENDER_DISPLAY_NAME = _env("SENDER_DISPLAY_NAME", "") or SENDER_NAME

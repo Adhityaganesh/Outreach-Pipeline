@@ -18,7 +18,7 @@ from groq import Groq
 import pandas as pd
 
 import pitch
-from config import CACHE_DB, GROQ_API_KEY
+from config import CACHE_DB, GROQ_API_KEY, GROQ_MODEL
 
 # ---------------------------------------------------------------------------
 # Cache helpers
@@ -121,7 +121,7 @@ async def _fetch_homepage(domain: str) -> str:
 # Groq call
 # ---------------------------------------------------------------------------
 
-_GROQ_MODEL   = "llama-3.3-70b-versatile"
+_GROQ_MODEL   = GROQ_MODEL
 _GROQ_DELAY   = 1.5   # seconds between calls — stays well under free-tier limits
 _groq_client: Groq | None = None
 
@@ -144,7 +144,7 @@ def _call_groq(company: str, page_text: str) -> str:
                 {"role": "user", "content": pitch.opener_prompt(
                     "", "", company, page_text=page_text)},
             ],
-            max_tokens=60,
+            max_tokens=400,   # reasoning models emit nothing on a small budget
             temperature=0.3,
         )
         result = resp.choices[0].message.content.strip().strip('"')

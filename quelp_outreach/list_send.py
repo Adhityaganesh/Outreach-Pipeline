@@ -34,6 +34,7 @@ from config import (
     DAILY_SEND_CAP,
     DATA_DIR,
     GROQ_API_KEY,
+    GROQ_MODEL,
     MAX_EMPLOYEES,
     MIN_EMPLOYEES,
     SEND_DELAY_MAX,
@@ -52,11 +53,11 @@ from sent_log import (
 )
 
 _PREVIEW = DATA_DIR / "preview.csv"
-_GROQ_MODEL = "llama-3.3-70b-versatile"
+_GROQ_MODEL = GROQ_MODEL
 
 # Cache key includes a hash of the prompt so editing pitch.py regenerates openers.
 _PROMPT_VERSION = hashlib.sha1(
-    (pitch.OPENER_SYSTEM + pitch.opener_prompt("x", "x", "x")).encode()
+    (pitch.OPENER_SYSTEM + pitch.opener_prompt("x", "x", "x") + _GROQ_MODEL).encode()
 ).hexdigest()[:8]
 
 
@@ -94,17 +95,22 @@ def _llm_opener(row) -> str:
         if _groq is None:
             from groq import Groq
             _groq = Groq(api_key=GROQ_API_KEY)
-        resp = _groq.chat.completions.create(
-            model=_GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": pitch.OPENER_SYSTEM},
-                {"role": "user", "content": pitch.opener_prompt(
-                    row["first_name"], row["title"], row["company"], row["industry"])},
-            ],
-            temperature=0.4,
-            max_tokens=60,
-        )
-        text = resp.choices[0].message.content.strip().strip('"').strip()
+        messages = [
+            {"role": "system", "content": pitch.OPENER_SYSTEM},
+            {"role": "user", "content": pitch.opener_prompt(
+                row["first_name"], row["title"], row["company"], row["industry"])},
+        ]
+        # Reasoning models (gpt-oss, qwen3) spend tokens thinking before they
+        # emit anything, so a small budget returns EMPTY content with
+        # finish_reason 'length'. Give room, and ask for minimal reasoning
+        # where the model supports it.
+        kwargs = dict(model=_GROQ_MODEL, messages=messages,
+                      temperature=0.4, max_tokens=400)
+        try:
+            resp = _groq.chat.completions.create(reasoning_effort="low", **kwargs)
+        except Exception:
+            resp = _groq.chat.completions.create(**kwargs)
+        text = (resp.choices[0].message.content or "").strip().strip('"').strip()
         text = re.split(r"(?<=[.!?])\s+", text)[0]
         # Reject anything that slipped past the rules
         if not text or len(text.split()) > 30 or "quelp" in text.lower() or "!" in text:
@@ -120,7 +126,11 @@ def get_opener(row, conn) -> str:
     hit = conn.execute("SELECT opener FROM list_openers WHERE key=?", (key,)).fetchone()
     if hit:
         return hit[0]
-    opener = _llm_opener(row) or pitch.fallback_opener(row["title"], row["company"])
+    opener = _llm_opener(row)
+    if not opener:
+        # Template line — NOT cached, so a later run with a working key or a
+        # valid model id writes a real opener instead of reusing this one.
+        return pitch.fallback_opener(row["title"], row["company"])
     conn.execute("INSERT OR REPLACE INTO list_openers VALUES (?, ?)", (key, opener))
     conn.commit()
     return opener
@@ -243,7 +253,7 @@ def run_test(df: pd.DataFrame, test_to: str, n: int, inboxes: list[Inbox]) -> No
     print("X-Outreach-Test-To header (Gmail: ⋮ → Show original).")
 
 
-def run_live(df: pd.DataFrame, inboxes: list[Inbox]) -> None:
+def run_live(df: pd.DataFrame, inboxes: list[Inbox], assume_yes: bool = False) -> None:
     plan = assign(len(df), inboxes)
     if not plan:
         print(f"Daily cap reached on every inbox ({inbox_summary(inboxes)}). Run again tomorrow.")
@@ -260,7 +270,9 @@ def run_live(df: pd.DataFrame, inboxes: list[Inbox]) -> None:
               f"  ← {plan[i].label}")
         print(f"      opener: {r['opener']}")
     print()
-    if input("Type SEND to confirm, anything else to abort: ").strip() != "SEND":
+    if assume_yes:
+        print("--yes: sending without confirmation (unattended run).")
+    elif input("Type SEND to confirm, anything else to abort: ").strip() != "SEND":
         print("Aborted.")
         return
 
@@ -316,6 +328,9 @@ def main() -> None:
     m.add_argument("--test-to", metavar="EMAIL", help="Send a few samples to this address")
     m.add_argument("--live", action="store_true", help="Send for real (asks for SEND)")
     p.add_argument("--samples", type=int, default=3, help="--test-to: how many (default 3, min 1 per inbox)")
+    p.add_argument("--yes", action="store_true",
+                   help="Skip the typed SEND confirmation. For scheduled runs only — "
+                        "the daily cap is then the ONLY thing limiting a live send.")
     p.add_argument("--from-inbox", metavar="ADDRESS",
                    help="Use only this inbox. Needed for per-domain spam tests: "
                         "mail-tester issues a new address per test, so send one sample per domain.")
@@ -344,7 +359,7 @@ def main() -> None:
     if a.test_to:
         run_test(df, a.test_to, a.samples, inboxes)
     elif a.live:
-        run_live(df, inboxes)
+        run_live(df, inboxes, a.yes)
     else:
         run_dry(df, inboxes, a.limit)
 

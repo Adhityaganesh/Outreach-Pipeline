@@ -184,7 +184,7 @@ def _apply_states(df, replied, bounced) -> None:
 # Modes
 # ---------------------------------------------------------------------------
 
-def run(live: bool, cap: int | None) -> None:
+def run(live: bool, cap: int | None, assume_yes: bool = False) -> None:
     df = load_log()
     if df.empty:
         print("sent_log.csv is empty — send some first emails first.")
@@ -227,7 +227,9 @@ def run(live: bool, cap: int | None) -> None:
             print(pitch.render_followup("Priya"))
         return
 
-    if input("\nType SEND to confirm, anything else to abort: ").strip() != "SEND":
+    if assume_yes:
+        print("--yes: sending without confirmation (unattended run).")
+    elif input("\nType SEND to confirm, anything else to abort: ").strip() != "SEND":
         print("Aborted.")
         return
 
@@ -275,8 +277,10 @@ def main() -> None:
     m = p.add_mutually_exclusive_group()
     m.add_argument("--dry-run", action="store_true", help="(default) Preview only")
     m.add_argument("--live", action="store_true", help="Send for real (asks for SEND)")
+    p.add_argument("--yes", action="store_true",
+                   help="Skip the typed SEND confirmation. For scheduled runs only.")
     a = p.parse_args()
-    run(a.live, a.cap)
+    run(a.live, a.cap, a.yes)
 
 
 if __name__ == "__main__":
