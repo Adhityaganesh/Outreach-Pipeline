@@ -31,7 +31,7 @@ from config import (
     GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET,
     GOOGLE_REFRESH_TOKEN,
-    SENDER_NAME,
+    SENDER_DISPLAY_NAME,
     TOKENS_DIR,
 )
 
@@ -197,7 +197,7 @@ def build_raw(service, to: str, subject: str, body: str,
     frm = sender_address(service)
     msg = MIMEText(body, "plain", "utf-8")
     msg["To"] = to
-    msg["From"] = formataddr((SENDER_NAME, frm))
+    msg["From"] = formataddr((SENDER_DISPLAY_NAME, frm))
     msg["Subject"] = subject
     # One-click-style opt-out for mail clients; helps deliverability.
     msg["List-Unsubscribe"] = f"<mailto:{frm}?subject=unsubscribe>"

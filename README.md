@@ -80,6 +80,10 @@ python inbox.py list       # connected? sent today / cap
 
 No `INBOXES` set = the original single-account behaviour with `token.json`.
 
+**Judging a domain:** `python followup.py` (dry run) records replies and bounces from every thread,
+including replies to follow-ups; then `python stats.py --days 15` shows sent / replied / bounced per
+domain and per inbox. Set `SENDER_DISPLAY_NAME` (e.g. `Adhitya from Quelp`) for the From line.
+
 ---
 
 ## Find emails cheaply (Prospeo + Clearout)

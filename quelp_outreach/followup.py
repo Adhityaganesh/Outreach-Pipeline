@@ -134,7 +134,8 @@ def classify(df: pd.DataFrame, services: _Services, now: datetime):
     due, replied, bounced, skip = [], [], [], []
 
     for idx, row in df.iterrows():
-        if row["status"] != "sent" or not row["thread_id"]:
+        # followed_up rows are still checked so a reply to the follow-up is recorded
+        if row["status"] not in ("sent", "followed_up") or not row["thread_id"]:
             skip.append((idx, f"status={row['status'] or 'blank'}"))
             continue
         sent_at = pd.to_datetime(row["sent_at"], utc=True, errors="coerce")
@@ -153,6 +154,8 @@ def classify(df: pd.DataFrame, services: _Services, now: datetime):
             replied.append(idx)
         elif state == "bounced":
             bounced.append(idx)
+        elif row["status"] == "followed_up":
+            skip.append((idx, "already followed up"))
         elif _norm_subject(df.at[idx, "subject"]) != _norm_subject(pitch.SUBJECT):
             # Sent under an older pitch (e.g. the support-inbox campaign) —
             # a sales-call follow-up in that thread would make no sense.

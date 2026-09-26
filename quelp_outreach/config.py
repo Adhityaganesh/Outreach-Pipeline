@@ -10,6 +10,8 @@ CACHE_DB = BASE_DIR / "cache.sqlite"
 
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
 SENDER_NAME        = os.getenv("SENDER_NAME", "Adhitya")
+# Name shown in the From line, e.g. "Adhitya from Quelp" (defaults to SENDER_NAME)
+SENDER_DISPLAY_NAME = os.getenv("SENDER_DISPLAY_NAME", "") or SENDER_NAME
 HUNTER_KEY         = os.getenv("HUNTER_KEY", "")
 GETPROSPECT_KEY    = os.getenv("GETPROSPECT_KEY", "")
 TOMBA_KEY          = os.getenv("TOMBA_KEY", "")
