@@ -40,6 +40,11 @@ MAX_EMPLOYEES        = int(_env("MAX_EMPLOYEES", "200"))
 SENDER_TITLE         = _env("SENDER_TITLE", "Founder, Quelp")
 SENDER_SITE          = _env("SENDER_SITE", "quelp.co.in")
 
+# List-Unsubscribe header. Required of bulk senders, but on a 1:1 cold email it
+# tells the receiver this is bulk mail, which can cost inbox placement. The P.S.
+# opt-out line in pitch.py stays either way.
+LIST_UNSUBSCRIBE     = _env("LIST_UNSUBSCRIBE", "true").lower() not in ("0", "false", "no")
+
 # Token file for Gmail OAuth (gitignored) — the default inbox
 GMAIL_TOKEN_PATH = BASE_DIR / "token.json"
 # One token per extra inbox: tokens/<address>.json (gitignored), via `python inbox.py add`

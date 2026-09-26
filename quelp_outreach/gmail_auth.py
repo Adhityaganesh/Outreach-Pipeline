@@ -28,6 +28,7 @@ from googleapiclient.discovery import build
 
 from config import (
     GMAIL_TOKEN_PATH,
+    LIST_UNSUBSCRIBE,
     GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET,
     GOOGLE_REFRESH_TOKEN,
@@ -193,27 +194,30 @@ def sender_address(service) -> str:
 
 
 def build_raw(service, to: str, subject: str, body: str,
-              in_reply_to: str = "") -> str:
+              in_reply_to: str = "", extra_headers: dict | None = None) -> str:
     frm = sender_address(service)
     msg = MIMEText(body, "plain", "utf-8")
     msg["To"] = to
     msg["From"] = formataddr((SENDER_DISPLAY_NAME, frm))
     msg["Subject"] = subject
-    # One-click-style opt-out for mail clients; helps deliverability.
-    msg["List-Unsubscribe"] = f"<mailto:{frm}?subject=unsubscribe>"
+    if LIST_UNSUBSCRIBE:
+        msg["List-Unsubscribe"] = f"<mailto:{frm}?subject=unsubscribe>"
     if in_reply_to:
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = in_reply_to
+    for k, v in (extra_headers or {}).items():
+        msg[k] = v
     return base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
 
 def send_email(service, to: str, subject: str, body: str,
-               thread_id: str = "", in_reply_to: str = "") -> tuple[str, str, str]:
+               thread_id: str = "", in_reply_to: str = "",
+               extra_headers: dict | None = None) -> tuple[str, str, str]:
     """
     Send one email. Returns (gmail_message_id, thread_id, rfc_message_id).
     Pass thread_id + in_reply_to to reply inside an existing thread.
     """
-    payload = {"raw": build_raw(service, to, subject, body, in_reply_to)}
+    payload = {"raw": build_raw(service, to, subject, body, in_reply_to, extra_headers)}
     if thread_id:
         payload["threadId"] = thread_id
     result = service.users().messages().send(userId="me", body=payload).execute()

@@ -223,17 +223,23 @@ def run_test(df: pd.DataFrame, test_to: str, n: int, inboxes: list[Inbox]) -> No
         ib = inboxes[i % len(inboxes)]
         service = services[ib.address]
         frm = sender_address(service)
-        subject = f"[TEST {frm} → {r['email']}] {r['subject']}"
+        # Send the real subject and body verbatim: a "[TEST …]" prefix with
+        # email addresses in it is itself a spam signal, so a modified subject
+        # would test something you never actually send.
+        subject = r["subject"]
         try:
-            gid, tid, rfc = send_email(service, test_to, subject, r["body"])
+            gid, tid, rfc = send_email(service, test_to, subject, r["body"],
+                                       extra_headers={"X-Outreach-Test-To": r["email"]})
             log_send(test_to, r["company"], f"{r['first_name']} {r['last_name']}".strip(),
                      "high", subject, gid, rfc, tid, "test", inbox=frm)
-            print(f"  OK  from {frm}: {r['email']} → {test_to}")
+            print(f"  OK  from {frm}: sample for {r['email']} → {test_to}")
         except HttpError as e:
             print(f"  ERROR from {frm}, {r['email']}: {e}")
         if i < len(df) - 1:
             time.sleep(3)
     print("\nCheck the inbox AND the spam folder before going live — one sample per sending address.")
+    print("Each sample is the real subject and body; the intended recipient is in the")
+    print("X-Outreach-Test-To header (Gmail: ⋮ → Show original).")
 
 
 def run_live(df: pd.DataFrame, inboxes: list[Inbox]) -> None:
