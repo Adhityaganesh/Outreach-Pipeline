@@ -22,8 +22,6 @@ Hi {first_name},
 
 {opener}
 
-Every sales team has the moment: the buyer asks about security, an integration or a pricing edge case, and the rep says "let me get back to you." The deal cools while they chase the answer internally.
-
 I'm building Quelp, an AI agent that sits in on your sales calls. Before the call it loads the account: past commitments, open objections, the CRM record and the latest email. During the call it answers the rep's questions in a side panel from your docs, playbook and CRM, and says "I don't have that" instead of guessing. After the call it records what was promised, so the next call picks up where the last one ended.
 
 I'm looking for a few sales teams to try it free on real calls as early design partners. Worth 15 minutes?
@@ -85,18 +83,24 @@ def opener_prompt(first_name: str, title: str, company: str,
 
 
 def fallback_opener(title: str, company: str) -> str:
-    """Used when there's no LLM key or the call fails. Safe, factual, generic."""
+    """
+    Used when there's no LLM key or the call fails. Safe, factual, generic.
+
+    This line also has to STATE THE PROBLEM: the body goes straight from the
+    opener into the product, so an opener that only says hello leaves the
+    email with no reason for the reader to care.
+    """
     t = (title or "").lower()
     # Account managers/executives are individual contributors, not team leads.
     ic = any(k in t for k in ("account manager", "account executive", "engineer"))
     leader = not ic and any(k in t for k in (
         "head", "vp", "vice president", "director", "chief", "cro",
         "sales manager", "team lead", "founder", "ceo"))
-    if company and leader:
-        return f"Reaching out because you run the sales team at {company}."
-    if company:
-        return f"Reaching out because you're on sales calls at {company}."
-    return "Reaching out because you're on sales calls every week."
+    if leader:
+        return ("When one of your reps can't answer a buyer's question on the call, "
+                "the deal cools while they chase the answer internally.")
+    return ("When a buyer asks something you can't answer on the call, the deal cools "
+            "while you chase the answer internally.")
 
 
 # ---------------------------------------------------------------------------
