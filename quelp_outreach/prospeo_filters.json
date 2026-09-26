@@ -1,7 +1,7 @@
 {
-  "_about": "Default ICP: sales leaders, AEs and SEs at 20-200 person companies. Keys starting with _ are notes and are not sent.",
-  "_location": "To limit by HQ country, add: \"company_location_search\": {\"include\": [\"India\"]} — values must match Prospeo's dashboard / Search Suggestions API exactly.",
-  "_industry": "To limit by industry, add \"company_industry\": {\"include\": [...]} using values from prospeo.io/api-docs/enum-industries or the dashboard's Search API export.",
+  "_about": "ICP: sales leaders, AEs and SEs at 21-200 person B2B software companies in India. Keys starting with _ are notes and are not sent.",
+  "_values": "Location and industry strings must match Prospeo's own vocabulary exactly. Get valid values free from the Search Suggestions API: POST https://api.prospeo.io/search-suggestions with {\"location_search\": \"...\"} or {\"industry_search\": \"...\"}.",
+  "_widen": "Too few results? Drop company_industry first, then raise max_person_per_company, then add \"201-500\" to the headcount range.",
   "person_job_title": {
     "include": [
       "Head of Sales",
@@ -20,6 +20,18 @@
     ],
     "exclude": ["Intern", "Assistant", "Recruiter"],
     "match_mode": "CONTAINS"
+  },
+  "company_location_search": {
+    "include": ["India"]
+  },
+  "company_industry": {
+    "include": [
+      "Software Development",
+      "IT Services and IT Consulting",
+      "Technology, Information and Internet",
+      "Data Infrastructure and Analytics",
+      "Internet Marketplace Platforms"
+    ]
   },
   "company_headcount_range": ["21-50", "51-100", "101-200"],
   "max_person_per_company": 2
