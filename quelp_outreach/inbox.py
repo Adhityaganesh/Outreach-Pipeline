@@ -10,8 +10,9 @@ After adding, list the address in INBOXES in .env, e.g.
 
 import argparse
 
+from config import TOKENS_DIR
 from gmail_auth import InboxNotConnected, add_inbox, get_gmail_service
-from inboxes import configured
+from inboxes import Inbox, configured
 
 
 def main() -> None:
@@ -30,13 +31,22 @@ def main() -> None:
             print(f"Now add it to INBOXES in .env, e.g.  INBOXES={address}:15")
         return
 
-    for ib in configured():
+    sending = configured()
+    print("SENDING (in INBOXES — these get the campaign)\n")
+    for ib in sending:
         try:
             get_gmail_service(ib.address)
             state = "connected"
         except InboxNotConnected:
             state = "NOT connected — run: python inbox.py add"
-        print(f"{ib.label:<32} sent today {ib.sent():>3}/{ib.cap:<3}  {state}")
+        print(f"  {ib.label:<32} sent today {ib.sent():>3}/{ib.cap:<3}  {state}")
+
+    listed = {ib.address for ib in sending}
+    idle = sorted(f.stem for f in TOKENS_DIR.glob("*.json") if f.stem not in listed)
+    if idle:
+        print("\nCONNECTED BUT NOT SENDING (warm-up only; add to INBOXES to use)\n")
+        for address in idle:
+            print(f"  {address:<32} sent today {Inbox(address, 0).sent():>3}")
 
 
 if __name__ == "__main__":
