@@ -1,21 +1,62 @@
 # Outbound Pipeline
 
-An automated B2B outbound email pipeline for [Quelp](https://quelp.co.in) — scrapes Indian SaaS companies, qualifies them, finds founder contacts, personalises cold emails, sends via Gmail, and follows up automatically.
+Cold-email outreach for [Quelp](https://quelp.co.in) — an AI call agent for B2B sales teams.
+Give it a lead list, it sends a personalised first email from your Gmail, follows up once in the
+same thread, and stops the moment someone replies, bounces or opts out.
+
+**Who it's for:** sales leaders, AEs and SEs at 20–200 person B2B SaaS.
 
 ---
 
-## Architecture
+## Quick start: send to a lead list
 
+```bash
+cd quelp_outreach
+
+# 1. Preview (default — nothing sends). Full bodies land in data/preview.csv
+python list_send.py --in ~/Downloads/leads.csv
+
+# 2. Send 3 samples to yourself — check inbox AND spam
+python list_send.py --in ~/Downloads/leads.csv --test-to adhitya@quelp.co.in
+
+# 3. Send for real (asks you to type SEND; stops at the daily cap)
+python list_send.py --in ~/Downloads/leads.csv --live
+
+# 4. Every morning: follow up on anyone silent for 3+ days
+python followup.py            # preview
+python followup.py --live
+
+# Someone replied "no"? Never email them (or their whole company) again:
+python suppress.py add jane@acme.com @acme.com
 ```
-Block 0 — Source         source.py          Scrape domains (Google Maps + Product Hunt)
-Block 1 — MX Gate        mx_gate.py         Keep only Google Workspace domains
-Block 2 — Helpdesk Gate  helpdesk_gate.py   Drop companies already using Zendesk/Intercom/Freshdesk
-Block 3 — Enrich         contact_enrich.py  Find founder name + email per domain
-Block 4 — Personalise    personalize.py     Generate one-line opener via Groq LLM
-Block 5 — Send           send.py            Send via Gmail API (dry-run / test / live)
-Block 6 — Follow-up      followup.py        Auto follow-up threads with no reply after N days
-         — Apollo Send   apollo_send.py     Send directly from Apollo contacts export
-```
+
+**Lead list format:** any CSV with an email column — Apollo, Hunter, Snov, Prospeo, Sales Navigator
+exports or a hand-made sheet. Name, company, title, industry and company size are picked up
+automatically if present (see `leads.py` for the header names it recognises). Rows are dropped
+for invalid/bounced emails, role addresses (info@, sales@…), duplicates, anyone already contacted,
+anyone on the suppression list, and companies outside 20–200 employees (`--no-size-gate` to keep them).
+
+**Changing the pitch:** all copy — subject, first email, follow-up, opt-out line, opener prompt —
+lives in `pitch.py`. Edit it there; every script picks it up. Follow-ups only go to leads who got
+the *current* subject, so old campaigns never get a mismatched nudge.
+
+### Safety rails
+
+| Rail | Where |
+|---|---|
+| Dry run is the default; live needs a typed `SEND` | all senders |
+| Daily cap across all runs, first emails + follow-ups (`DAILY_SEND_CAP`, default 15) | `sent_log.remaining_today` |
+| 40–90s random gap between sends; stops on Gmail 403/429 | `list_send`, `followup` |
+| Opt-out line in every email + `List-Unsubscribe` header | `pitch.py`, `gmail_auth.py` |
+| Any reply in the thread (even from a colleague) → never emailed again | `followup.py` |
+| Bounce in the thread → address added to `data/suppress.txt` | `followup.py` |
+| One follow-up max, threaded with the real Message-ID | `followup.py` |
+
+### Before the first live send (new domain)
+
+1. In Google Workspace admin, turn on **DKIM** for quelp.co.in, and check SPF + DMARC records exist at GoDaddy.
+2. Keep `DAILY_SEND_CAP` at 10–15 for the first 2–3 weeks; raise slowly only if replies come in and nothing lands in spam.
+3. Always run `--test-to` first after editing `pitch.py`.
 
 ---
 
@@ -25,7 +66,7 @@ Block 6 — Follow-up      followup.py        Auto follow-up threads with no rep
 
 ```bash
 git clone https://github.com/Adhityaganesh/Outreach-Pipeline.git
-cd Outbound-Pipeline/quelp_outreach
+cd Outreach-Pipeline/quelp_outreach
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -41,28 +82,31 @@ cp .env.example .env
 
 | Variable | Description |
 |---|---|
-| `GROQ_API_KEY` | Groq API key (LLM for openers) |
-| `APIFY_TOKEN` | Apify token (Google Maps scraper) |
-| `GOOGLE_CLIENT_ID` | Google OAuth client ID |
-| `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
-| `SENDER_NAME` | Your name (appears in email signature) |
-| `APOLLO_API_KEY` | Apollo.io API key (optional — employee size gate) |
-| `HUNTER_KEY` | Hunter.io key (optional — email pattern lookup) |
-| `DAILY_SEND_CAP` | Max emails per run (default: 30) |
-| `SEND_DELAY_MIN` | Min delay between sends in seconds (default: 40) |
-| `SEND_DELAY_MAX` | Max delay between sends in seconds (default: 90) |
-| `FOLLOWUP_DAYS` | Days before follow-up is sent (default: 3) |
-| `MAX_EMPLOYEES` | Employee count ceiling for size gate (default: 15) |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth client (Gmail API enabled) |
+| `SENDER_NAME` / `SENDER_TITLE` / `SENDER_SITE` | Signature lines |
+| `GROQ_API_KEY` | Optional — LLM openers; without it a safe template line is used |
+| `DAILY_SEND_CAP` | Max emails per day, all runs combined (default: 15) |
+| `SEND_DELAY_MIN` / `SEND_DELAY_MAX` | Random gap between sends in seconds (default: 40–90) |
+| `FOLLOWUP_DAYS` | Days of silence before the follow-up (default: 3) |
+| `MIN_EMPLOYEES` / `MAX_EMPLOYEES` | Size gate for `list_send.py` (default: 20–200) |
+| `APIFY_TOKEN`, `APOLLO_API_KEY`, `HUNTER_KEY`, … | Legacy Blocks 0–3 only |
 
 ### 3. Gmail OAuth
 
-On first run, a browser window will open for Google OAuth consent. Sign in with the Gmail account you want to send from. The token is cached in `token.json` (gitignored).
+On first run, a browser window will open for Google OAuth consent (send + read-only — read access is
+used only to detect replies/bounces and to thread follow-ups). Sign in with the account you send from.
+The token is cached in `token.json` (gitignored) and shared by every script. Tokens from the old
+send-only setup trigger one re-consent automatically.
 
 Your Google Cloud project needs the **Gmail API** enabled and `http://localhost:8080` registered as an authorised redirect URI.
 
 ---
 
-## Full Pipeline Run
+## Legacy: scrape-and-enrich pipeline (Blocks 0–5)
+
+> Built for the earlier support-inbox ICP (founders of ≤15-person companies, Google Workspace only,
+> no helpdesk tool). The gates in Blocks 1–3 don't match the sales-team ICP; `personalize.py` and
+> `send.py` now use the new pitch, but for sales leads prefer `list_send.py` with a sourced list.
 
 ```bash
 cd quelp_outreach
@@ -91,34 +135,9 @@ python send.py --live --min-confidence high
 
 ---
 
-## Apollo Export Send
+## Apollo exports
 
-To send directly from an Apollo.io contacts CSV export (skips Blocks 0–4):
-
-```bash
-# Preview
-python apollo_send.py --dry-run
-
-# Test to your own inbox first
-python apollo_send.py --test-to you@yourdomain.com
-
-# Send live
-python apollo_send.py --live --in /path/to/apollo-contacts-export.csv
-```
-
----
-
-## Follow-up Pass
-
-Run after 3+ days to follow up on threads with no reply:
-
-```bash
-# Preview who would get a follow-up
-python followup.py --dry-run
-
-# Send follow-ups
-python followup.py --live
-```
+`apollo_send.py` still works but just forwards to `list_send.py`.
 
 ---
 
@@ -152,8 +171,12 @@ All send scripts support three modes:
 ## Data Flow
 
 ```
-raw_companies.csv  →  mx_passed.csv  →  helpdesk_passed.csv
-    →  enriched.csv  →  ready_to_send.csv  →  sent_log.csv
+leads.csv  →  list_send.py  →  sent_log.csv  →  followup.py
+                  ↓                                  ↓
+            preview.csv                     suppress.txt (bounces, opt-outs)
+
+legacy:  raw_companies.csv → mx_passed.csv → helpdesk_passed.csv
+           → enriched.csv → ready_to_send.csv → send.py → sent_log.csv
 ```
 
 All intermediate files land in `quelp_outreach/data/` (gitignored — may contain PII).
@@ -162,9 +185,9 @@ All intermediate files land in `quelp_outreach/data/` (gitignored — may contai
 
 ## Stack
 
-- **Gmail API** — sending + reply detection
+- **Gmail API** — sending, reply/bounce detection, threading
 - **Apify** — Google Maps scraper (`compass/crawler-google-places`)
-- **Groq / Llama 3.1** — personalised openers
+- **Groq / Llama 3.3** — personalised openers (optional)
 - **Apollo.io** — contact export + optional employee enrichment
 - **dnspython** — MX record lookup
 - **httpx + BeautifulSoup** — helpdesk detection + page scraping

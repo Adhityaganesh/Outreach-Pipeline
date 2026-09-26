@@ -1,417 +1,219 @@
 """
 Block 6 — Follow-up
-Sends one follow-up to leads who were emailed but haven't replied after N days.
+Sends ONE follow-up, in the same thread, to people who got the first email
+FOLLOWUP_DAYS+ days ago and haven't replied.
 
-Modes (safest is default):
-  --dry-run   (DEFAULT) Print who would get a follow-up and who is skipped. Sends nothing.
-  --live      Send actual follow-ups. Requires typing "SEND".
+  python followup.py            # dry run (default)
+  python followup.py --live     # send, asks for SEND
 
-Requires gmail.send + gmail.readonly scopes. On first run after Block 5 it will
-re-consent because the readonly scope is new.
+Before sending, every thread is checked:
+  - any message from someone other than you → status 'replied', never emailed again
+  - a delivery-failure notice              → status 'bounced', address suppressed
+Only emails sent with the CURRENT pitch.SUBJECT get a follow-up, so leads
+from an older campaign never receive a mismatched nudge.
+Follow-ups count toward the same daily cap as first emails.
 """
 
 import argparse
-import base64
-import csv
-import os
 import random
-import sys
 import time
-import tempfile
-import shutil
-from datetime import datetime, timezone, timedelta
-from email.mime.text import MIMEText
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from config import (
-    DATA_DIR,
-    DAILY_SEND_CAP,
-    GMAIL_TOKEN_PATH,
-    GOOGLE_CLIENT_ID,
-    GOOGLE_CLIENT_SECRET,
-    SEND_DELAY_MIN,
-    SEND_DELAY_MAX,
-    SENDER_NAME,
+import pitch
+from config import DAILY_SEND_CAP, FOLLOWUP_DAYS, SEND_DELAY_MAX, SEND_DELAY_MIN
+from gmail_auth import get_gmail_service, get_rfc_message_id, send_email
+from sent_log import (
+    add_suppressed,
+    is_suppressed,
+    load_log,
+    load_suppressed,
+    remaining_today,
+    save_log,
+    sent_today,
 )
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-_SCOPES = [
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/gmail.readonly",
-]
-
-_SENT_LOG = DATA_DIR / "sent_log.csv"
-
-FOLLOWUP_DAYS = int(os.getenv("FOLLOWUP_DAYS", "3"))
-
-_CLIENT_CONFIG = {
-    "installed": {
-        "client_id":     GOOGLE_CLIENT_ID,
-        "client_secret": GOOGLE_CLIENT_SECRET,
-        "auth_uri":      "https://accounts.google.com/o/oauth2/auth",
-        "token_uri":     "https://oauth2.googleapis.com/token",
-        "redirect_uris": ["http://localhost:8080"],
-    }
-}
-
-_FOLLOWUP_BODY = """\
-Hi {first_name},
-
-Quick nudge on this — I know inboxes get buried. Still happy to set Quelp up on your inbox for a free two-week trial whenever you have 15 minutes. No worries if it's not a fit.
-
-{sender_name}\
-"""
-
-# ---------------------------------------------------------------------------
-# Gmail auth — same token.json as Block 5, but now needs readonly too.
-# If token.json has only gmail.send, it will re-consent automatically.
-# ---------------------------------------------------------------------------
-
-def _get_gmail_service():
-    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-        sys.exit(
-            "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set in .env."
-        )
-
-    creds: Credentials | None = None
-
-    if GMAIL_TOKEN_PATH.exists():
-        creds = Credentials.from_authorized_user_file(str(GMAIL_TOKEN_PATH), _SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception:
-                creds = None
-
-        if not creds or not creds.valid:
-            flow = InstalledAppFlow.from_client_config(_CLIENT_CONFIG, _SCOPES)
-            creds = flow.run_local_server(port=8080, access_type="offline", prompt="consent")
-
-        GMAIL_TOKEN_PATH.write_text(creds.to_json())
-
-    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+_BOUNCE_SENDERS = ("mailer-daemon", "postmaster", "mail delivery")
 
 
 # ---------------------------------------------------------------------------
-# Reply detection
+# Thread inspection
 # ---------------------------------------------------------------------------
 
-def _has_reply(service, thread_id: str, sent_to: str) -> bool:
+def _thread_state(service, thread_id: str) -> tuple[str, str]:
     """
-    Return True if the thread contains any inbound message from sent_to.
-    We look for messages whose From header contains the recipient's address.
+    Return (state, subject) where state is 'none' | 'replied' | 'bounced' | 'error'.
+    Any message in the thread that you didn't send counts: replies from a
+    colleague or a different alias are still replies.
     """
     try:
         thread = service.users().threads().get(
             userId="me", id=thread_id, format="metadata",
-            metadataHeaders=["From", "To"],
+            metadataHeaders=["From", "Subject"],
         ).execute()
     except HttpError as e:
-        print(f"    [warn] Could not fetch thread {thread_id}: {e}")
-        return False
+        print(f"    [warn] could not read thread {thread_id}: {e.status_code}")
+        return "error", ""
 
-    messages = thread.get("messages", [])
-    if len(messages) <= 1:
-        return False
-
-    # Skip the first message (our outbound). Check the rest.
-    for msg in messages[1:]:
-        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
-        from_header = headers.get("From", "").lower()
-        if sent_to.lower() in from_header:
-            return True
-
-    return False
-
-
-# ---------------------------------------------------------------------------
-# Follow-up email building
-# ---------------------------------------------------------------------------
-
-def _build_followup_mime(
-    to: str,
-    original_subject: str,
-    original_message_id: str,
-    first_name: str,
-) -> str:
-    """Return a base64url-encoded follow-up threaded as a reply."""
-    body = _FOLLOWUP_BODY.format(
-        first_name=first_name or "there",
-        sender_name=SENDER_NAME,
-    )
-    subject = f"Re: {original_subject}" if not original_subject.startswith("Re:") else original_subject
-
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["To"]         = to
-    msg["From"]       = f"{SENDER_NAME} <me>"
-    msg["Subject"]    = subject
-    msg["In-Reply-To"] = original_message_id
-    msg["References"]  = original_message_id
-
-    return base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    msgs = thread.get("messages", [])
+    subject = ""
+    state = "none"
+    for i, m in enumerate(msgs):
+        headers = {h["name"].lower(): h["value"] for h in m.get("payload", {}).get("headers", [])}
+        if i == 0:
+            subject = headers.get("subject", "")
+        if "SENT" in m.get("labelIds", []):
+            continue
+        frm = headers.get("from", "").lower()
+        if any(b in frm for b in _BOUNCE_SENDERS):
+            state = "bounced"
+        else:
+            return "replied", subject      # a human reply wins over everything
+    return state, subject
 
 
-# ---------------------------------------------------------------------------
-# Sent-log helpers
-# ---------------------------------------------------------------------------
+def _norm_subject(s: str) -> str:
+    s = str(s).strip()
+    while s.lower().startswith("re:"):
+        s = s[3:].strip()
+    return s.lower()
 
-_LOG_FIELDS = [
-    "email", "company", "name", "confidence",
-    "sent_at", "gmail_message_id", "thread_id", "status",
-]
-
-# Optional columns added by this block
-_EXTENDED_FIELDS = _LOG_FIELDS + ["subject", "followup_sent_at", "followup_message_id"]
-
-
-def _load_log() -> pd.DataFrame:
-    if not _SENT_LOG.exists():
-        sys.exit(f"sent_log.csv not found at {_SENT_LOG}. Run Block 5 first.")
-    df = pd.read_csv(_SENT_LOG)
-    # Ensure optional columns exist
-    for col in ["subject", "followup_sent_at", "followup_message_id"]:
-        if col not in df.columns:
-            df[col] = ""
-    df["sent_at"] = pd.to_datetime(df["sent_at"], utc=True, errors="coerce")
-    return df
-
-
-def _save_log(df: pd.DataFrame) -> None:
-    """Write df back to sent_log.csv atomically."""
-    cols = [c for c in _EXTENDED_FIELDS if c in df.columns]
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", delete=False, suffix=".csv",
-        dir=str(DATA_DIR), newline="", encoding="utf-8",
-    )
-    try:
-        df[cols].to_csv(tmp, index=False)
-        tmp.close()
-        shutil.move(tmp.name, str(_SENT_LOG))
-    except Exception:
-        tmp.close()
-        os.unlink(tmp.name)
-        raise
-
-
-# ---------------------------------------------------------------------------
-# Core logic
-# ---------------------------------------------------------------------------
 
 def _first_name(name: str) -> str:
-    return str(name).split()[0] if name and str(name).strip() else "there"
+    n = str(name).strip()
+    return n.split()[0] if n else "there"
 
 
-def _classify_rows(df: pd.DataFrame, service, now: datetime):
-    """
-    Return three lists of index values:
-      due       — status='sent', old enough, no reply detected
-      replied   — status='sent' but reply found in thread
-      skip      — everything else (already followed_up, test, error, too recent)
-    """
-    due, replied, skip = [], [], []
-
+def classify(df: pd.DataFrame, service, now: datetime):
     cutoff = now - timedelta(days=FOLLOWUP_DAYS)
+    suppressed = load_suppressed()
+    due, replied, bounced, skip = [], [], [], []
 
     for idx, row in df.iterrows():
-        status = str(row.get("status", "")).strip()
-
-        if status != "sent":
-            skip.append(idx)
+        if row["status"] != "sent" or not row["thread_id"]:
+            skip.append((idx, f"status={row['status'] or 'blank'}"))
             continue
-
-        sent_at = row["sent_at"]
-        if pd.isna(sent_at) or sent_at > cutoff:
-            skip.append(idx)
-            continue
-
-        thread_id = str(row.get("thread_id", "")).strip()
-        email     = str(row.get("email", "")).strip()
-
-        if not thread_id:
-            skip.append(idx)
-            continue
-
-        if _has_reply(service, thread_id, email):
-            replied.append(idx)
-        else:
-            due.append(idx)
-
-    return due, replied, skip
-
-
-# ---------------------------------------------------------------------------
-# Mode: dry-run
-# ---------------------------------------------------------------------------
-
-def run_dry_run() -> None:
-    df = _load_log()
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=FOLLOWUP_DAYS)
-
-    service = _get_gmail_service()
-
-    print(f"\n{'='*65}")
-    print(f"DRY RUN — follow-up pass (nothing will be sent)")
-    print(f"Follow-up window: >= {FOLLOWUP_DAYS} days since sent_at")
-    print(f"Cutoff: {cutoff.strftime('%Y-%m-%d %H:%M UTC')}")
-    print(f"{'='*65}\n")
-
-    due_idxs, replied_idxs, skip_idxs = _classify_rows(df, service, now)
-
-    for idx in due_idxs:
-        row = df.loc[idx]
-        age = (now - row["sent_at"]).days
-        print(f"[WOULD FOLLOW UP]  {row['email']}  ({row.get('name', '')})")
-        print(f"  Company : {row.get('company', '')}")
-        print(f"  Sent    : {row['sent_at'].strftime('%Y-%m-%d')}  ({age}d ago)")
-        print(f"  Thread  : {row.get('thread_id', '')}")
-        print()
-
-    for idx in replied_idxs:
-        row = df.loc[idx]
-        print(f"[REPLIED — skip]   {row['email']}  ({row.get('name', '')})")
-
-    for idx in skip_idxs:
-        row = df.loc[idx]
-        status = str(row.get("status", ""))
-        sent_at = row["sent_at"]
+        sent_at = pd.to_datetime(row["sent_at"], utc=True, errors="coerce")
         if pd.isna(sent_at):
-            reason = "no sent_at"
+            skip.append((idx, "no sent_at"))
+            continue
+
+        state, subject = _thread_state(service, row["thread_id"])
+        if subject and not row["subject"]:
+            df.at[idx, "subject"] = subject          # backfill old logs
+        if state == "replied":
+            replied.append(idx)
+        elif state == "bounced":
+            bounced.append(idx)
+        elif _norm_subject(df.at[idx, "subject"]) != _norm_subject(pitch.SUBJECT):
+            # Sent under an older pitch (e.g. the support-inbox campaign) —
+            # a sales-call follow-up in that thread would make no sense.
+            skip.append((idx, "earlier campaign — different pitch"))
+        elif is_suppressed(row["email"], suppressed):
+            skip.append((idx, "suppressed"))
         elif sent_at > cutoff:
             age = (now - sent_at).total_seconds() / 86400
-            reason = f"too recent ({age:.1f}d < {FOLLOWUP_DAYS}d)"
+            skip.append((idx, f"too recent ({age:.1f}d < {FOLLOWUP_DAYS}d)"))
+        elif state == "error":
+            skip.append((idx, "thread unreadable"))
         else:
-            reason = f"status={status}"
-        print(f"[SKIP]             {row['email']}  — {reason}")
+            due.append(idx)
+    return due, replied, bounced, skip
 
-    print(f"\n{'='*65}")
-    print(f"Due for follow-up : {len(due_idxs)}")
-    print(f"Already replied   : {len(replied_idxs)}")
-    print(f"Skipped           : {len(skip_idxs)}")
-    print(f"{'='*65}")
 
-    # Update replied statuses in log (safe even in dry-run — just status updates)
-    if replied_idxs:
-        df.loc[replied_idxs, "status"] = "replied"
-        _save_log(df)
-        print(f"\nMarked {len(replied_idxs)} row(s) as 'replied' in sent_log.csv.")
+def _apply_states(df, replied, bounced) -> None:
+    if replied:
+        df.loc[replied, "status"] = "replied"
+    if bounced:
+        df.loc[bounced, "status"] = "bounced"
+        add_suppressed(df.loc[bounced, "email"].tolist())
 
 
 # ---------------------------------------------------------------------------
-# Mode: live
+# Modes
 # ---------------------------------------------------------------------------
 
-def run_live(cap: int) -> None:
-    df = _load_log()
-    now = datetime.now(timezone.utc)
-
-    service = _get_gmail_service()
-
-    due_idxs, replied_idxs, _ = _classify_rows(df, service, now)
-
-    # Mark replies now
-    if replied_idxs:
-        df.loc[replied_idxs, "status"] = "replied"
-
-    if not due_idxs:
-        _save_log(df)
-        print("No follow-ups due. Log updated.")
+def run(live: bool, cap: int) -> None:
+    df = load_log()
+    if df.empty:
+        print("sent_log.csv is empty — send some first emails first.")
         return
 
-    to_send = min(len(due_idxs), cap)
+    service = get_gmail_service()
+    now = datetime.now(timezone.utc)
+    due, replied, bounced, skip = classify(df, service, now)
 
-    print(f"\n{'='*65}")
-    print(f"LIVE FOLLOW-UP SEND")
-    print(f"  Due: {len(due_idxs)}  |  Cap: {cap}  |  Will send: {to_send}")
-    print(f"{'='*65}")
-    print("\nRecipients:")
-    for idx in due_idxs[:to_send]:
-        row = df.loc[idx]
-        print(f"  {row['email']}  ({row.get('name', '')})  — {row.get('company', '')}")
+    for idx in replied:
+        print(f"[REPLIED]  {df.at[idx, 'email']}  ({df.at[idx, 'name']}) — won't email again")
+    for idx in bounced:
+        print(f"[BOUNCED]  {df.at[idx, 'email']} — added to suppression list")
+    for idx, why in skip:
+        if df.at[idx, "status"] in ("sent",):
+            print(f"[SKIP]     {df.at[idx, 'email']} — {why}")
+    for idx in due:
+        print(f"[DUE]      {df.at[idx, 'email']}  ({df.at[idx, 'name']}, {df.at[idx, 'company']})")
 
-    print()
-    confirm = input("Type SEND to confirm, anything else to abort: ").strip()
-    if confirm != "SEND":
+    # Status updates are safe in dry run too — they only record what Gmail shows.
+    _apply_states(df, replied, bounced)
+    save_log(df)
+
+    left = remaining_today(cap)
+    batch = due[:left]
+    print(f"\nDue: {len(due)}  |  Replied: {len(replied)}  |  Bounced: {len(bounced)}  |  "
+          f"Today: {sent_today()}/{cap} → can send {len(batch)} now")
+
+    if not live or not batch:
+        if not live:
+            print("\nDry run. Preview of the follow-up:\n")
+            print(pitch.render_followup("Priya"))
+        return
+
+    if input("\nType SEND to confirm, anything else to abort: ").strip() != "SEND":
         print("Aborted.")
         return
 
     sent = 0
-    for i, idx in enumerate(due_idxs[:to_send]):
-        row   = df.loc[idx]
-        email = str(row["email"]).strip()
-        name  = str(row.get("name", ""))
-        subj  = str(row.get("subject", ""))
-        msg_id_orig = str(row.get("gmail_message_id", ""))
-        thread_id   = str(row.get("thread_id", ""))
-
-        print(f"[{sent+1}/{to_send}] → {email}  ({name})")
+    for n, idx in enumerate(batch):
+        row = df.loc[idx]
+        subject = row["subject"] or pitch.SUBJECT
+        subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+        rfc = row["rfc_message_id"] or get_rfc_message_id(service, row["gmail_message_id"])
+        print(f"[{n+1}/{len(batch)}] → {row['email']}")
         try:
-            raw = _build_followup_mime(email, subj, msg_id_orig, _first_name(name))
-            result = service.users().messages().send(
-                userId="me",
-                body={"raw": raw, "threadId": thread_id},
-            ).execute()
-            fu_msg_id = result.get("id", "")
-            df.at[idx, "status"]             = "followed_up"
-            df.at[idx, "followup_sent_at"]   = now.isoformat()
-            df.at[idx, "followup_message_id"] = fu_msg_id
-            print(f"  OK  message_id={fu_msg_id}")
+            gid, _, _ = send_email(
+                service, row["email"], subject, pitch.render_followup(_first_name(row["name"])),
+                thread_id=row["thread_id"], in_reply_to=rfc,
+            )
+            df.at[idx, "status"] = "followed_up"
+            df.at[idx, "followup_sent_at"] = datetime.now(timezone.utc).isoformat()
+            df.at[idx, "followup_message_id"] = gid
+            save_log(df)                      # save as we go — safe on Ctrl-C
+            print(f"  OK  {gid}")
             sent += 1
         except HttpError as e:
             print(f"  ERROR — {e}")
+            if e.status_code in (403, 429):
+                print("  Gmail is rate-limiting this account. Stopping.")
+                break
+        if n < len(batch) - 1:
+            d = random.uniform(SEND_DELAY_MIN, SEND_DELAY_MAX)
+            print(f"  waiting {d:.0f}s…")
+            time.sleep(d)
 
-        is_last = (i == to_send - 1)
-        if not is_last:
-            delay = random.uniform(SEND_DELAY_MIN, SEND_DELAY_MAX)
-            print(f"  Waiting {delay:.0f}s…")
-            time.sleep(delay)
+    print(f"\nDone. {sent} follow-up(s) sent. {len(due) - sent} still due.")
 
-    _save_log(df)
-    remaining = len(due_idxs) - sent
-    print(f"\nDone. {sent} follow-up(s) sent. {remaining} remaining. Log updated.")
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Send follow-ups to non-replied leads. Default mode: --dry-run."
-    )
-    parser.add_argument(
-        "--cap", type=int, default=DAILY_SEND_CAP, metavar="N",
-        help=f"Max follow-ups to send per run (default: {DAILY_SEND_CAP})",
-    )
-
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--dry-run", dest="dry_run", action="store_true",
-        help="(DEFAULT) Show who would get a follow-up. Sends nothing.",
-    )
-    mode.add_argument(
-        "--live", action="store_true",
-        help="Send actual follow-ups. Requires typed SEND confirmation.",
-    )
-
-    args = parser.parse_args()
-
-    if args.live:
-        run_live(args.cap)
-    else:
-        run_dry_run()
+    p = argparse.ArgumentParser(description="Follow up on non-replied leads. Default: dry run.")
+    p.add_argument("--cap", type=int, default=DAILY_SEND_CAP,
+                   help=f"Daily cap shared with first emails (default {DAILY_SEND_CAP})")
+    m = p.add_mutually_exclusive_group()
+    m.add_argument("--dry-run", action="store_true", help="(default) Preview only")
+    m.add_argument("--live", action="store_true", help="Send for real (asks for SEND)")
+    a = p.parse_args()
+    run(a.live, a.cap)
 
 
 if __name__ == "__main__":

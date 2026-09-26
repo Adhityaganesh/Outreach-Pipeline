@@ -18,7 +18,12 @@ GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN", "")
 APOLLO_API_KEY       = os.getenv("APOLLO_API_KEY", "")
-MAX_EMPLOYEES        = int(os.getenv("MAX_EMPLOYEES", "15"))
+MIN_EMPLOYEES        = int(os.getenv("MIN_EMPLOYEES", "20"))
+MAX_EMPLOYEES        = int(os.getenv("MAX_EMPLOYEES", "200"))
+
+# Sender identity (signature + opt-out line)
+SENDER_TITLE         = os.getenv("SENDER_TITLE", "Founder, Quelp")
+SENDER_SITE          = os.getenv("SENDER_SITE", "quelp.co.in")
 
 # Token file for Gmail OAuth (gitignored)
 GMAIL_TOKEN_PATH = BASE_DIR / "token.json"
@@ -26,6 +31,13 @@ GMAIL_TOKEN_PATH = BASE_DIR / "token.json"
 # Throttle limits
 DNS_TIMEOUT_SECONDS  = 5
 MAX_DOMAINS_PER_RUN  = 5_000
-DAILY_SEND_CAP       = int(os.getenv("DAILY_SEND_CAP", "30"))
+# New domains: keep this low (10–15) for the first 2–3 weeks, then raise
+# slowly. The cap is enforced per calendar day across ALL runs, first
+# emails + follow-ups combined (see sent_log.sent_today()).
+DAILY_SEND_CAP       = int(os.getenv("DAILY_SEND_CAP", "15"))
 SEND_DELAY_MIN       = float(os.getenv("SEND_DELAY_MIN", "40"))
 SEND_DELAY_MAX       = float(os.getenv("SEND_DELAY_MAX", "90"))
+FOLLOWUP_DAYS        = int(os.getenv("FOLLOWUP_DAYS", "3"))
+
+# Suppression list: one email or @domain per line. Never emailed again.
+SUPPRESS_PATH        = DATA_DIR / "suppress.txt"

@@ -17,7 +17,8 @@ from bs4 import BeautifulSoup
 from groq import Groq
 import pandas as pd
 
-from config import CACHE_DB, GROQ_API_KEY, SENDER_NAME
+import pitch
+from config import CACHE_DB, GROQ_API_KEY
 
 # ---------------------------------------------------------------------------
 # Cache helpers
@@ -26,7 +27,7 @@ from config import CACHE_DB, GROQ_API_KEY, SENDER_NAME
 def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(CACHE_DB)
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS opener_cache "
+        "CREATE TABLE IF NOT EXISTS opener_cache_v2 "
         "(domain TEXT PRIMARY KEY, opener TEXT NOT NULL)"
     )
     conn.commit()
@@ -35,14 +36,14 @@ def _get_conn() -> sqlite3.Connection:
 
 def _cache_get(conn: sqlite3.Connection, domain: str) -> str | None:
     row = conn.execute(
-        "SELECT opener FROM opener_cache WHERE domain = ?", (domain,)
+        "SELECT opener FROM opener_cache_v2 WHERE domain = ?", (domain,)
     ).fetchone()
     return row[0] if row else None
 
 
 def _cache_set(conn: sqlite3.Connection, domain: str, opener: str) -> None:
     conn.execute(
-        "INSERT OR REPLACE INTO opener_cache (domain, opener) VALUES (?, ?)",
+        "INSERT OR REPLACE INTO opener_cache_v2 (domain, opener) VALUES (?, ?)",
         (domain, opener),
     )
     conn.commit()
@@ -61,7 +62,7 @@ _HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-_FALLBACK_OPENER = "You're building something interesting in your space."
+_FALLBACK_OPENER = pitch.fallback_opener("", "")
 
 
 def _extract_page_text(html: str) -> str:
@@ -135,23 +136,18 @@ def _get_groq() -> Groq:
 
 
 def _call_groq(company: str, page_text: str) -> str:
-    prompt = (
-        f"In ONE sentence (max 25 words), write a cold-email opener that references "
-        f"what {company} does AND naturally connects it to the idea that their "
-        f"support/email volume grows with their business. "
-        f"Conversational, not a description. "
-        f"Start with 'Saw' or 'Noticed' — not '{company} offers' or '{company} is'.\n\n"
-        f"Homepage text:\n{page_text}"
-    )
     try:
         resp = _get_groq().chat.completions.create(
             model=_GROQ_MODEL,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": pitch.OPENER_SYSTEM},
+                {"role": "user", "content": pitch.opener_prompt(
+                    "", "", company, page_text=page_text)},
+            ],
             max_tokens=60,
             temperature=0.3,
         )
         result = resp.choices[0].message.content.strip().strip('"')
-        # Trim to one sentence just in case
         sentences = re.split(r"(?<=[.!?])\s+", result)
         return sentences[0] if sentences else result
     except Exception:
@@ -211,22 +207,7 @@ def _first_name(email: str) -> str:
     return part.capitalize()
 
 
-_EMAIL_TEMPLATE = """\
-Hi {first_name},
-
-{opener}
-
-I'm a solo founder building Quelp — it drafts support replies grounded in your own help docs, right inside Gmail. You review and send; nothing goes out on its own.
-
-At a small SaaS, support@ usually lands on the founder or one teammate, answered by hand in Gmail. That's exactly where Quelp fits.
-
-I'm looking for a few design partners to use it free for two weeks — I set it up on your inbox myself, 15 minutes, no work on your side.
-
-Worth a quick look?
-
-{sender}"""
-
-_SUBJECT_TEMPLATE = "support@ at {company} — quick question"
+# Copy lives in pitch.py — edit it there.
 
 
 def assemble_email(row: dict, opener: str) -> tuple[str, str]:
@@ -245,13 +226,7 @@ def assemble_email(row: dict, opener: str) -> tuple[str, str]:
     else:
         first_name = _first_name(best_email)
 
-    subject = _SUBJECT_TEMPLATE.format(company=company)
-    body    = _EMAIL_TEMPLATE.format(
-        first_name=first_name,
-        opener=opener,
-        sender=SENDER_NAME,
-    )
-    return subject, body
+    return pitch.render_first_email(first_name, opener)
 
 
 # ---------------------------------------------------------------------------

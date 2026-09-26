@@ -12,145 +12,35 @@ Confidence gate (default: medium — skips low-confidence role-email guesses):
 """
 
 import argparse
-import base64
-import csv
-import os
 import random
 import sys
 import time
-from datetime import datetime, timezone
-from email.mime.text import MIMEText
 from pathlib import Path
 
 import pandas as pd
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from config import (
-    BASE_DIR,
-    DATA_DIR,
-    DAILY_SEND_CAP,
-    GMAIL_TOKEN_PATH,
-    GOOGLE_CLIENT_ID,
-    GOOGLE_CLIENT_SECRET,
-    SEND_DELAY_MAX,
-    SEND_DELAY_MIN,
-    SENDER_NAME,
-)
+from config import DAILY_SEND_CAP, DATA_DIR, SEND_DELAY_MAX, SEND_DELAY_MIN
+from gmail_auth import get_gmail_service, send_email
+from sent_log import SENT_LOG, contacted_emails, load_suppressed, log_send, remaining_today
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants + shared helpers (auth, sending, log live in shared modules)
 # ---------------------------------------------------------------------------
 
-_SCOPES       = ["https://www.googleapis.com/auth/gmail.send"]
-_SENT_LOG     = DATA_DIR / "sent_log.csv"
+_SENT_LOG     = SENT_LOG
 _DRY_RUN_FILE = DATA_DIR / "dry_run_preview.csv"
 
 _CONFIDENCE_RANK = {"high": 2, "medium": 1, "low": 0}
 
-# Client-secrets dict built from env vars — no secrets file needed on disk.
-_CLIENT_CONFIG = {
-    "installed": {
-        "client_id":     GOOGLE_CLIENT_ID,
-        "client_secret": GOOGLE_CLIENT_SECRET,
-        "auth_uri":      "https://accounts.google.com/o/oauth2/auth",
-        "token_uri":     "https://oauth2.googleapis.com/token",
-        "redirect_uris": ["http://localhost:8080"],
-    }
-}
-
-# ---------------------------------------------------------------------------
-# Gmail auth
-# ---------------------------------------------------------------------------
 
 def _get_gmail_service():
-    """
-    Return an authenticated Gmail API service object.
-    On first run, opens the OAuth consent flow and caches token.json.
-    On subsequent runs, refreshes the token silently.
-    """
-    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-        sys.exit(
-            "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set in .env.\n"
-            "Create OAuth credentials at console.cloud.google.com → APIs & Services → Credentials."
-        )
-
-    creds: Credentials | None = None
-
-    if GMAIL_TOKEN_PATH.exists():
-        creds = Credentials.from_authorized_user_file(str(GMAIL_TOKEN_PATH), _SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_config(_CLIENT_CONFIG, _SCOPES)
-            creds = flow.run_local_server(port=8080, access_type="offline", prompt="consent")
-        GMAIL_TOKEN_PATH.write_text(creds.to_json())
-
-    return build("gmail", "v1", credentials=creds, cache_discovery=False)
-
-
-# ---------------------------------------------------------------------------
-# Email building
-# ---------------------------------------------------------------------------
-
-def _build_mime(to: str, subject: str, body: str) -> str:
-    """Return a base64url-encoded RFC 2822 message string."""
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["to"]      = to
-    msg["from"]    = f"{SENDER_NAME} <me>"   # Gmail replaces <me> with authed address
-    msg["subject"] = subject
-    return base64.urlsafe_b64encode(msg.as_bytes()).decode()
-
-
-# ---------------------------------------------------------------------------
-# Sent-log helpers
-# ---------------------------------------------------------------------------
-
-_LOG_FIELDS = [
-    "email", "company", "name", "confidence",
-    "sent_at", "gmail_message_id", "thread_id", "status",
-]
+    return get_gmail_service()
 
 
 def _load_sent_emails() -> set[str]:
-    """Return the set of email addresses already in sent_log."""
-    if not _SENT_LOG.exists():
-        return set()
-    df = pd.read_csv(_SENT_LOG)
-    return set(df["email"].astype(str).str.lower().tolist())
-
-
-def _log_send(
-    email: str,
-    company: str,
-    name: str,
-    confidence: str,
-    gmail_message_id: str,
-    thread_id: str,
-    status: str,
-) -> None:
-    """Append one row to sent_log.csv."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    write_header = not _SENT_LOG.exists()
-    with open(_SENT_LOG, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=_LOG_FIELDS)
-        if write_header:
-            writer.writeheader()
-        writer.writerow({
-            "email":            email,
-            "company":          company,
-            "name":             name,
-            "confidence":       confidence,
-            "sent_at":          datetime.now(timezone.utc).isoformat(),
-            "gmail_message_id": gmail_message_id,
-            "thread_id":        thread_id,
-            "status":           status,
-        })
+    """Already-contacted addresses plus the suppression list."""
+    return contacted_emails() | load_suppressed()
 
 
 # ---------------------------------------------------------------------------
@@ -197,19 +87,6 @@ def _load_queue(in_path: Path, min_confidence: str) -> pd.DataFrame:
         )
 
     return df.reset_index(drop=True)
-
-
-# ---------------------------------------------------------------------------
-# Core send
-# ---------------------------------------------------------------------------
-
-def _send_one(service, to: str, subject: str, body: str) -> tuple[str, str]:
-    """Send a single email. Returns (message_id, thread_id)."""
-    raw = _build_mime(to, subject, body)
-    result = service.users().messages().send(
-        userId="me", body={"raw": raw}
-    ).execute()
-    return result.get("id", ""), result.get("threadId", "")
 
 
 # ---------------------------------------------------------------------------
@@ -297,13 +174,13 @@ def run_test_send(in_path: Path, test_to: str, min_confidence: str, cap: int) ->
 
         print(f"[{sent+1}/{cap}] orig={orig_to}  conf={confidence} → {test_to}")
         try:
-            msg_id, thread_id = _send_one(service, test_to, subject, body)
-            _log_send(test_to, company, name, confidence, msg_id, thread_id, "test")
+            msg_id, thread_id, rfc = send_email(service, test_to, subject, body)
+            log_send(test_to, company, name, confidence, subject, msg_id, rfc, thread_id, "test")
             print(f"  OK  message_id={msg_id}")
             sent += 1
         except HttpError as e:
             print(f"  ERROR — {e}")
-            _log_send(test_to, company, name, confidence, "", "", f"error: {e}")
+            log_send(test_to, company, name, confidence, subject, "", "", "", f"error: {e.status_code}")
 
         is_last = (idx == df.index[-1]) or (sent >= cap)
         if not is_last:
@@ -326,7 +203,7 @@ def run_live(in_path: Path, min_confidence: str, cap: int) -> None:
         row for _, row in df.iterrows()
         if str(row["best_email"]).strip().lower() not in already_sent
     ]
-    to_send = min(len(queue), cap)
+    to_send = min(len(queue), remaining_today(cap))
 
     print(f"\n{'='*65}")
     print(f"LIVE SEND")
@@ -365,13 +242,13 @@ def run_live(in_path: Path, min_confidence: str, cap: int) -> None:
 
         print(f"[{sent+1}/{to_send}] → {to}  conf={confidence}")
         try:
-            msg_id, thread_id = _send_one(service, to, subject, body)
-            _log_send(to, company, name, confidence, msg_id, thread_id, "sent")
+            msg_id, thread_id, rfc = send_email(service, to, subject, body)
+            log_send(to, company, name, confidence, subject, msg_id, rfc, thread_id, "sent")
             print(f"  OK  message_id={msg_id}")
             sent += 1
         except HttpError as e:
             print(f"  ERROR — {e}")
-            _log_send(to, company, name, confidence, "", "", f"error: {e}")
+            log_send(to, company, name, confidence, subject, "", "", "", f"error: {e.status_code}")
 
         is_last = (i == to_send - 1)
         if not is_last:
