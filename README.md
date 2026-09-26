@@ -82,6 +82,11 @@ python inbox.py list       # connected? sent today / cap
 
 No `INBOXES` set = the original single-account behaviour with `token.json`.
 
+**Free, unlimited spam scoring:** `python spamcheck.py` runs the real pitch through SpamAssassin
+via Postmark's free API without sending anything — no signup, no daily limit. Use it to iterate on
+copy and to compare domains (`--domain example.com` works for a domain you do not own yet).
+mail-tester allows only 3 free tests a day, so keep it for final confirmation.
+
 **Scoring every inbox:** `python spamtest.py --list` shows the pairing order, then
 `python spamtest.py ADDR1 ADDR2 …` sends one byte-identical sample from each connected inbox to
 the mail-tester addresses you pass. Results cluster by domain, not by mailbox.
