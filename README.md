@@ -82,6 +82,10 @@ python inbox.py list       # connected? sent today / cap
 
 No `INBOXES` set = the original single-account behaviour with `token.json`.
 
+**Scoring every inbox:** `python spamtest.py --list` shows the pairing order, then
+`python spamtest.py ADDR1 ADDR2 …` sends one byte-identical sample from each connected inbox to
+the mail-tester addresses you pass. Results cluster by domain, not by mailbox.
+
 **Judging a domain:** `python followup.py` (dry run) records replies and bounces from every thread,
 including replies to follow-ups; then `python stats.py --days 15` shows sent / replied / bounced per
 domain and per inbox. Set `SENDER_DISPLAY_NAME` (e.g. `Adhitya from Quelp`) for the From line.
