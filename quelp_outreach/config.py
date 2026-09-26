@@ -2,7 +2,10 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Absolute path, not CWD: a scheduled run (launchd/cron) starts with no shell
+# environment and often a different working directory, and load_dotenv() would
+# silently find nothing — every setting would fall back to its default.
+load_dotenv(Path(__file__).parent / ".env")
 
 
 def _env(key: str, default: str = "") -> str:
