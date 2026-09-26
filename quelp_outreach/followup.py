@@ -11,7 +11,8 @@ Before sending, every thread is checked:
   - a delivery-failure notice              → status 'bounced', address suppressed
 Only emails sent with the CURRENT pitch.SUBJECT get a follow-up, so leads
 from an older campaign never receive a mismatched nudge.
-Follow-ups count toward the same daily cap as first emails.
+Follow-ups go out from the inbox that sent the first email, and count toward
+that inbox's daily cap together with first emails.
 """
 
 import argparse
@@ -24,15 +25,15 @@ from googleapiclient.errors import HttpError
 
 import pitch
 from config import DAILY_SEND_CAP, FOLLOWUP_DAYS, SEND_DELAY_MAX, SEND_DELAY_MIN
-from gmail_auth import get_gmail_service, get_rfc_message_id, send_email
+from gmail_auth import InboxNotConnected, get_gmail_service, get_rfc_message_id, send_email
+from inboxes import Inbox, configured
+from inboxes import summary as inbox_summary
 from sent_log import (
     add_suppressed,
     is_suppressed,
     load_log,
     load_suppressed,
-    remaining_today,
     save_log,
-    sent_today,
 )
 
 _BOUNCE_SENDERS = ("mailer-daemon", "postmaster", "mail delivery")
@@ -86,7 +87,48 @@ def _first_name(name: str) -> str:
     return n.split()[0] if n else "there"
 
 
-def classify(df: pd.DataFrame, service, now: datetime):
+class _Services:
+    """
+    Gmail service per sending inbox. A follow-up must come from the inbox
+    that sent the first email — the thread only exists in that mailbox.
+    Rows logged before multi-inbox support have a blank inbox → default account.
+    """
+    def __init__(self):
+        self._cache: dict[str, object] = {}
+
+    def get(self, inbox: str):
+        key = str(inbox or "").strip().lower()
+        if key not in self._cache:
+            try:
+                self._cache[key] = get_gmail_service(key)
+            except InboxNotConnected:
+                self._cache[key] = None
+        return self._cache[key]
+
+
+class _Budget:
+    """Remaining sends today per inbox (single-inbox mode: one shared budget)."""
+    def __init__(self, inboxes: list[Inbox]):
+        self.inboxes = inboxes
+        self.single = len(inboxes) == 1 and not inboxes[0].address
+        self._left: dict[str, int] = {}
+
+    def _key(self, inbox: str) -> str:
+        return "" if self.single else str(inbox or "").lower()
+
+    def left(self, inbox: str) -> int:
+        k = self._key(inbox)
+        if k not in self._left:
+            match = [ib for ib in self.inboxes if ib.address == k]
+            ib = match[0] if match else Inbox(k, DAILY_SEND_CAP)
+            self._left[k] = ib.remaining()
+        return self._left[k]
+
+    def use(self, inbox: str) -> None:
+        self._left[self._key(inbox)] = self.left(inbox) - 1
+
+
+def classify(df: pd.DataFrame, services: _Services, now: datetime):
     cutoff = now - timedelta(days=FOLLOWUP_DAYS)
     suppressed = load_suppressed()
     due, replied, bounced, skip = [], [], [], []
@@ -100,6 +142,10 @@ def classify(df: pd.DataFrame, service, now: datetime):
             skip.append((idx, "no sent_at"))
             continue
 
+        service = services.get(row["inbox"])
+        if service is None:
+            skip.append((idx, f"inbox {row['inbox']} not connected — python inbox.py add"))
+            continue
         state, subject = _thread_state(service, row["thread_id"])
         if subject and not row["subject"]:
             df.at[idx, "subject"] = subject          # backfill old logs
@@ -135,15 +181,16 @@ def _apply_states(df, replied, bounced) -> None:
 # Modes
 # ---------------------------------------------------------------------------
 
-def run(live: bool, cap: int) -> None:
+def run(live: bool, cap: int | None) -> None:
     df = load_log()
     if df.empty:
         print("sent_log.csv is empty — send some first emails first.")
         return
 
-    service = get_gmail_service()
+    inboxes = configured(cap)
+    services = _Services()
     now = datetime.now(timezone.utc)
-    due, replied, bounced, skip = classify(df, service, now)
+    due, replied, bounced, skip = classify(df, services, now)
 
     for idx in replied:
         print(f"[REPLIED]  {df.at[idx, 'email']}  ({df.at[idx, 'name']}) — won't email again")
@@ -153,16 +200,23 @@ def run(live: bool, cap: int) -> None:
         if df.at[idx, "status"] in ("sent",):
             print(f"[SKIP]     {df.at[idx, 'email']} — {why}")
     for idx in due:
-        print(f"[DUE]      {df.at[idx, 'email']}  ({df.at[idx, 'name']}, {df.at[idx, 'company']})")
+        print(f"[DUE]      {df.at[idx, 'email']}  ({df.at[idx, 'name']}, {df.at[idx, 'company']})"
+              f"  ← {df.at[idx, 'inbox'] or 'default inbox'}")
 
     # Status updates are safe in dry run too — they only record what Gmail shows.
     _apply_states(df, replied, bounced)
     save_log(df)
 
-    left = remaining_today(cap)
-    batch = due[:left]
+    # Each follow-up counts against the cap of the inbox that sends it
+    budget = _Budget(inboxes)
+    batch = []
+    for idx in due:
+        if budget.left(df.at[idx, "inbox"]) > 0:
+            batch.append(idx)
+            budget.use(df.at[idx, "inbox"])
     print(f"\nDue: {len(due)}  |  Replied: {len(replied)}  |  Bounced: {len(bounced)}  |  "
-          f"Today: {sent_today()}/{cap} → can send {len(batch)} now")
+          f"can send {len(batch)} now")
+    print(f"Today: {inbox_summary(inboxes)}")
 
     if not live or not batch:
         if not live:
@@ -175,12 +229,16 @@ def run(live: bool, cap: int) -> None:
         return
 
     sent = 0
+    blocked: set[str] = set()
     for n, idx in enumerate(batch):
         row = df.loc[idx]
+        if row["inbox"] in blocked:
+            continue
+        service = services.get(row["inbox"])
         subject = row["subject"] or pitch.SUBJECT
         subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
         rfc = row["rfc_message_id"] or get_rfc_message_id(service, row["gmail_message_id"])
-        print(f"[{n+1}/{len(batch)}] → {row['email']}")
+        print(f"[{n+1}/{len(batch)}] {row['inbox'] or 'default inbox'} → {row['email']}")
         try:
             gid, _, _ = send_email(
                 service, row["email"], subject, pitch.render_followup(_first_name(row["name"])),
@@ -195,8 +253,9 @@ def run(live: bool, cap: int) -> None:
         except HttpError as e:
             print(f"  ERROR — {e}")
             if e.status_code in (403, 429):
-                print("  Gmail is rate-limiting this account. Stopping.")
-                break
+                print(f"  Gmail is rate-limiting {row['inbox'] or 'this account'}. "
+                      "No more follow-ups from it this run.")
+                blocked.add(row["inbox"])
         if n < len(batch) - 1:
             d = random.uniform(SEND_DELAY_MIN, SEND_DELAY_MAX)
             print(f"  waiting {d:.0f}s…")
@@ -207,8 +266,9 @@ def run(live: bool, cap: int) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Follow up on non-replied leads. Default: dry run.")
-    p.add_argument("--cap", type=int, default=DAILY_SEND_CAP,
-                   help=f"Daily cap shared with first emails (default {DAILY_SEND_CAP})")
+    p.add_argument("--cap", type=int, default=None,
+                   help="Override every inbox's daily cap (shared with first emails; "
+                        f"default: INBOXES caps, else {DAILY_SEND_CAP})")
     m = p.add_mutually_exclusive_group()
     m.add_argument("--dry-run", action="store_true", help="(default) Preview only")
     m.add_argument("--live", action="store_true", help="Send for real (asks for SEND)")

@@ -45,7 +45,7 @@ the *current* subject, so old campaigns never get a mismatched nudge.
 | Rail | Where |
 |---|---|
 | Dry run is the default; live needs a typed `SEND` | all senders |
-| Daily cap across all runs, first emails + follow-ups (`DAILY_SEND_CAP`, default 15) | `sent_log.remaining_today` |
+| Daily cap per inbox across all runs, first emails + follow-ups (`INBOXES` caps / `DAILY_SEND_CAP`, default 15) | `inboxes.py`, `sent_log.remaining_today` |
 | 40–90s random gap between sends; stops on Gmail 403/429 | `list_send`, `followup` |
 | Opt-out line in every email + `List-Unsubscribe` header | `pitch.py`, `gmail_auth.py` |
 | Any reply in the thread (even from a colleague) → never emailed again | `followup.py` |
@@ -54,9 +54,31 @@ the *current* subject, so old campaigns never get a mismatched nudge.
 
 ### Before the first live send (new domain)
 
-1. In Google Workspace admin, turn on **DKIM** for quelp.co.in, and check SPF + DMARC records exist at GoDaddy.
+1. Send from a separate cold-email domain (see *Multiple sending inboxes*). In Google Workspace admin, turn on **DKIM** for it, and add SPF + DMARC records at your DNS provider.
 2. Keep `DAILY_SEND_CAP` at 10–15 for the first 2–3 weeks; raise slowly only if replies come in and nothing lands in spam.
 3. Always run `--test-to` first after editing `pitch.py`.
+
+---
+
+## Multiple sending inboxes
+
+Cold email should go out from a **separate domain** (e.g. `getquelp.com`), never quelp.co.in —
+spam complaints hit the whole domain. Put 2–3 inboxes on it and the pipeline rotates between them:
+
+```bash
+python inbox.py add        # browser sign-in, once per inbox → tokens/<address>.json
+# .env:  INBOXES=adhitya@getquelp.com:15,team@getquelp.com:10   (address:daily cap)
+python inbox.py list       # connected? sent today / cap
+```
+
+- `list_send.py` spreads each run round-robin across inboxes that still have capacity.
+- `followup.py` replies from the **same inbox** that sent the first email (the thread lives there),
+  counting against that inbox's cap.
+- `--test-to` sends at least one sample from every inbox — check each lands in the inbox, not spam.
+- A Gmail rate-limit on one inbox pauses only that inbox for the run.
+- More inboxes spread per-mailbox load, **not** domain reputation — keep totals modest while the domain is new.
+
+No `INBOXES` set = the original single-account behaviour with `token.json`.
 
 ---
 
@@ -113,7 +135,8 @@ cp .env.example .env
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth client (Gmail API enabled) |
 | `SENDER_NAME` / `SENDER_TITLE` / `SENDER_SITE` | Signature lines |
 | `GROQ_API_KEY` | Optional — LLM openers; without it a safe template line is used |
-| `DAILY_SEND_CAP` | Max emails per day, all runs combined (default: 15) |
+| `INBOXES` | Sending inboxes with optional caps, e.g. `a@getquelp.com:15,b@getquelp.com:10` |
+| `DAILY_SEND_CAP` | Max emails per inbox per day, all runs combined (default: 15) |
 | `SEND_DELAY_MIN` / `SEND_DELAY_MAX` | Random gap between sends in seconds (default: 40–90) |
 | `FOLLOWUP_DAYS` | Days of silence before the follow-up (default: 3) |
 | `MIN_EMPLOYEES` / `MAX_EMPLOYEES` | Size gate for `list_send.py` (default: 20–200) |

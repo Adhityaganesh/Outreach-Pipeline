@@ -21,7 +21,7 @@ import pandas as pd
 from googleapiclient.errors import HttpError
 
 from config import DAILY_SEND_CAP, DATA_DIR, SEND_DELAY_MAX, SEND_DELAY_MIN
-from gmail_auth import get_gmail_service, send_email
+from gmail_auth import get_gmail_service, send_email, sender_address
 from sent_log import SENT_LOG, contacted_emails, load_suppressed, log_send, remaining_today
 
 # ---------------------------------------------------------------------------
@@ -175,7 +175,8 @@ def run_test_send(in_path: Path, test_to: str, min_confidence: str, cap: int) ->
         print(f"[{sent+1}/{cap}] orig={orig_to}  conf={confidence} → {test_to}")
         try:
             msg_id, thread_id, rfc = send_email(service, test_to, subject, body)
-            log_send(test_to, company, name, confidence, subject, msg_id, rfc, thread_id, "test")
+            log_send(test_to, company, name, confidence, subject, msg_id, rfc, thread_id, "test",
+                     inbox=sender_address(service))
             print(f"  OK  message_id={msg_id}")
             sent += 1
         except HttpError as e:
@@ -243,7 +244,8 @@ def run_live(in_path: Path, min_confidence: str, cap: int) -> None:
         print(f"[{sent+1}/{to_send}] → {to}  conf={confidence}")
         try:
             msg_id, thread_id, rfc = send_email(service, to, subject, body)
-            log_send(to, company, name, confidence, subject, msg_id, rfc, thread_id, "sent")
+            log_send(to, company, name, confidence, subject, msg_id, rfc, thread_id, "sent",
+                     inbox=sender_address(service))
             print(f"  OK  message_id={msg_id}")
             sent += 1
         except HttpError as e:

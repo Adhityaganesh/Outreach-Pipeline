@@ -25,15 +25,21 @@ MAX_EMPLOYEES        = int(os.getenv("MAX_EMPLOYEES", "200"))
 SENDER_TITLE         = os.getenv("SENDER_TITLE", "Founder, Quelp")
 SENDER_SITE          = os.getenv("SENDER_SITE", "quelp.co.in")
 
-# Token file for Gmail OAuth (gitignored)
+# Token file for Gmail OAuth (gitignored) — the default inbox
 GMAIL_TOKEN_PATH = BASE_DIR / "token.json"
+# One token per extra inbox: tokens/<address>.json (gitignored), via `python inbox.py add`
+TOKENS_DIR       = BASE_DIR / "tokens"
+# Sending inboxes, comma-separated, optional per-inbox daily cap after a colon:
+#   INBOXES=adhitya@getquelp.com:15,team@getquelp.com:10
+# Empty → single-inbox mode using token.json. Without a :cap, DAILY_SEND_CAP applies.
+INBOXES              = os.getenv("INBOXES", "")
 
 # Throttle limits
 DNS_TIMEOUT_SECONDS  = 5
 MAX_DOMAINS_PER_RUN  = 5_000
 # New domains: keep this low (10–15) for the first 2–3 weeks, then raise
-# slowly. The cap is enforced per calendar day across ALL runs, first
-# emails + follow-ups combined (see sent_log.sent_today()).
+# slowly. The cap is PER INBOX, per calendar day (UTC) across ALL runs,
+# first emails + follow-ups combined (see sent_log.sent_today()).
 DAILY_SEND_CAP       = int(os.getenv("DAILY_SEND_CAP", "15"))
 SEND_DELAY_MIN       = float(os.getenv("SEND_DELAY_MIN", "40"))
 SEND_DELAY_MAX       = float(os.getenv("SEND_DELAY_MAX", "90"))

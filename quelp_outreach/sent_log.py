@@ -20,7 +20,7 @@ SENT_LOG = DATA_DIR / "sent_log.csv"
 LOG_FIELDS = [
     "email", "company", "name", "confidence", "subject",
     "sent_at", "gmail_message_id", "rfc_message_id", "thread_id", "status",
-    "followup_sent_at", "followup_message_id",
+    "followup_sent_at", "followup_message_id", "inbox",
 ]
 
 # Statuses:
@@ -81,8 +81,8 @@ def save_log(df: pd.DataFrame) -> None:
 
 def log_send(email: str, company: str, name: str, confidence: str,
              subject: str, gmail_message_id: str, rfc_message_id: str,
-             thread_id: str, status: str) -> None:
-    """Append one row."""
+             thread_id: str, status: str, inbox: str = "") -> None:
+    """Append one row. inbox = the address it was sent from."""
     _ensure_schema()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     write_header = not SENT_LOG.exists()
@@ -98,6 +98,7 @@ def log_send(email: str, company: str, name: str, confidence: str,
             "rfc_message_id": rfc_message_id,
             "thread_id": thread_id, "status": status,
             "followup_sent_at": "", "followup_message_id": "",
+            "inbox": inbox.lower(),
         })
 
 
@@ -110,20 +111,25 @@ def contacted_emails() -> set[str]:
     return set(real["email"].str.strip().str.lower())
 
 
-def sent_today() -> int:
-    """Emails that went out today (UTC), first emails + follow-ups combined."""
+def sent_today(inbox: str | None = None) -> int:
+    """
+    Emails that went out today (UTC), first emails + follow-ups combined.
+    inbox=None counts every inbox; an address counts only that inbox.
+    """
     df = load_log()
     if df.empty:
         return 0
     today = datetime.now(timezone.utc).date().isoformat()
     real = df[~df["status"].str.startswith(("test", "error"))]
+    if inbox:
+        real = real[real["inbox"].str.lower() == inbox.lower()]
     first = real["sent_at"].str.startswith(today).sum()
     fups = real["followup_sent_at"].str.startswith(today).sum()
     return int(first + fups)
 
 
-def remaining_today(cap: int) -> int:
-    return max(0, cap - sent_today())
+def remaining_today(cap: int, inbox: str | None = None) -> int:
+    return max(0, cap - sent_today(inbox))
 
 
 # ---------------------------------------------------------------------------
