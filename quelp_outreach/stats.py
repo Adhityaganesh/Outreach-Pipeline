@@ -28,7 +28,16 @@ def main() -> None:
     df = df[df["status"].isin(["sent", "followed_up", "replied", "bounced"])].copy()
     if a.days:
         since = datetime.now(timezone.utc) - timedelta(days=a.days)
-        df = df[pd.to_datetime(df["sent_at"], utc=True, errors="coerce") >= since]
+        # stdlib parse — see followup._parse_utc: pd.to_datetime segfaults on
+        # some pandas builds, and this runs over the same column.
+        def _after(value) -> bool:
+            try:
+                d = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+            except ValueError:
+                return False
+            return (d if d.tzinfo else d.replace(tzinfo=timezone.utc)) >= since
+
+        df = df[[_after(v) for v in df["sent_at"]]]
     if df.empty:
         print("No real sends in the log yet.")
         return

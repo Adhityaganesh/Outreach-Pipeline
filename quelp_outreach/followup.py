@@ -82,6 +82,25 @@ def _norm_subject(s: str) -> str:
     return s.lower()
 
 
+def _parse_utc(value) -> datetime | None:
+    """
+    Parse an ISO timestamp from the log.
+
+    Deliberately stdlib, not pd.to_datetime: on some pandas builds (2.2.2 on
+    CPython 3.13) that call SEGFAULTS the interpreter, which killed the whole
+    daily run before it printed anything. These values are ISO strings this
+    pipeline wrote itself, so fromisoformat is enough — and cannot crash.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _first_name(name: str) -> str:
     n = str(name).strip()
     return n.split()[0] if n else "there"
@@ -138,8 +157,8 @@ def classify(df: pd.DataFrame, services: _Services, now: datetime):
         if row["status"] not in ("sent", "followed_up") or not row["thread_id"]:
             skip.append((idx, f"status={row['status'] or 'blank'}"))
             continue
-        sent_at = pd.to_datetime(row["sent_at"], utc=True, errors="coerce")
-        if pd.isna(sent_at):
+        sent_at = _parse_utc(row["sent_at"])
+        if sent_at is None:
             skip.append((idx, "no sent_at"))
             continue
 
