@@ -24,7 +24,7 @@ Hi {first_name},
 
 I'm building Quelp, an AI agent that sits in on your sales calls. Before the call it loads the account: past commitments, open objections, the CRM record and the latest email. During the call it answers the rep's questions in a side panel from your docs, playbook and CRM, and says "I don't have that" instead of guessing. After the call it records what was promised, so the next call picks up where the last one ended.
 
-I'm looking for a few sales teams to try it free on real calls as early design partners. Worth 15 minutes?
+Happy to set it up on a few of your real calls so you can see whether it actually helps. Free, and no work on your side. Worth 15 minutes?
 
 {sender_name}
 {sender_title} · {sender_site}
