@@ -176,7 +176,7 @@ def render(df: pd.DataFrame) -> pd.DataFrame:
     openers, subjects, bodies = [], [], []
     for i, row in df.iterrows():
         opener = get_opener(row, conn)
-        subject, body = pitch.render_first_email(row["first_name"], opener)
+        subject, body = pitch.render_first_email(row["first_name"], opener, row["email"])
         openers.append(opener)
         subjects.append(subject)
         bodies.append(body)

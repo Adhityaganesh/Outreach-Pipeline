@@ -9,7 +9,7 @@ FOLLOWUP_DAYS+ days ago and haven't replied.
 Before sending, every thread is checked:
   - any message from someone other than you → status 'replied', never emailed again
   - a delivery-failure notice              → status 'bounced', address suppressed
-Only emails sent with the CURRENT pitch.SUBJECT get a follow-up, so leads
+Only emails sent with one of the CURRENT pitch subjects get a follow-up, so leads
 from an older campaign never receive a mismatched nudge.
 Follow-ups go out from the inbox that sent the first email, and count toward
 that inbox's daily cap together with first emails.
@@ -175,7 +175,7 @@ def classify(df: pd.DataFrame, services: _Services, now: datetime):
             bounced.append(idx)
         elif row["status"] == "followed_up":
             skip.append((idx, "already followed up"))
-        elif _norm_subject(df.at[idx, "subject"]) != _norm_subject(pitch.SUBJECT):
+        elif not pitch.is_current_subject(df.at[idx, "subject"]):
             # Sent under an older pitch (e.g. the support-inbox campaign) —
             # a sales-call follow-up in that thread would make no sense.
             skip.append((idx, "earlier campaign — different pitch"))

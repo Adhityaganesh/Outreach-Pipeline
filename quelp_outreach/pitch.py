@@ -9,22 +9,56 @@ Rules: buyer's pain first, product described by what it does on the call,
 no stack/vendor names, no invented customers or stats, "I'm building" (pre-launch).
 """
 
+import hashlib
+
 from config import SENDER_NAME, SENDER_SITE, SENDER_TITLE
 
 # ---------------------------------------------------------------------------
 # First email
 # ---------------------------------------------------------------------------
 
-SUBJECT = "the \"let me get back to you\" moment"
+# Several subjects and closings, so a day's sends are not byte-identical.
+# The variant is chosen from a hash of the recipient's address, NOT at random:
+# it must come out the same in the preview and in the live send, and the same
+# on a re-run, or you would preview one email and send another.
+
+SUBJECTS = [
+    "the \"let me get back to you\" moment",
+    "when your rep can't answer on the call",
+    "the pause mid-call that costs the deal",
+]
+
+# First entry stays importable as pitch.SUBJECT for older callers.
+SUBJECT = SUBJECTS[0]
+
+PRODUCT = (
+    "I'm building Quelp, an AI agent that sits in on your sales calls. Before the "
+    "call it loads the account: past commitments, open objections, the CRM record "
+    "and the latest email. During the call it answers the rep's questions in a side "
+    "panel from your docs, playbook and CRM, and says \"I don't have that\" instead "
+    "of guessing. After the call it records what was promised, so the next call "
+    "picks up where the last one ended."
+)
+
+CLOSINGS = [
+    "Happy to set it up on a few of your real calls so you can see whether it "
+    "actually helps. Free, and no work on your side. Worth 15 minutes?",
+
+    "If it's worth a look, I'll set it up on a couple of your live calls and you "
+    "can judge it from there. No cost, nothing to configure. Worth 15 minutes?",
+
+    "I can have it running on your next few calls with nothing needed from your "
+    "side, so you can see whether it earns its place. Worth 15 minutes?",
+]
 
 BODY = """\
 Hi {first_name},
 
 {opener}
 
-I'm building Quelp, an AI agent that sits in on your sales calls. Before the call it loads the account: past commitments, open objections, the CRM record and the latest email. During the call it answers the rep's questions in a side panel from your docs, playbook and CRM, and says "I don't have that" instead of guessing. After the call it records what was promised, so the next call picks up where the last one ended.
+{product}
 
-Happy to set it up on a few of your real calls so you can see whether it actually helps. Free, and no work on your side. Worth 15 minutes?
+{closing}
 
 {sender_name}
 {sender_title} · {sender_site}
@@ -107,16 +141,45 @@ def fallback_opener(title: str, company: str) -> str:
 # Assembly helpers
 # ---------------------------------------------------------------------------
 
-def render_first_email(first_name: str, opener: str) -> tuple[str, str]:
+def _variant(key: str, count: int) -> int:
+    """Stable index from the recipient's address — same answer every run."""
+    if not key:
+        return 0
+    return int(hashlib.sha1(key.strip().lower().encode()).hexdigest(), 16) % count
+
+
+def is_current_subject(subject: str) -> bool:
+    """
+    True if this subject belongs to the CURRENT campaign. followup.py uses it
+    to avoid nudging someone in a thread from an older pitch — a check that
+    used to compare against one fixed subject.
+    """
+    def norm(value: str) -> str:
+        value = str(value).strip()
+        while value.lower().startswith("re:"):
+            value = value[3:].strip()
+        return value.lower()
+
+    return norm(subject) in {norm(s) for s in SUBJECTS}
+
+
+def render_first_email(first_name: str, opener: str, key: str = "") -> tuple[str, str]:
+    """
+    key is the recipient's email address; it picks the subject and closing so
+    a day's sends are not byte-identical. Omitting it gives the first variant,
+    which keeps previews and spam checks deterministic.
+    """
     body = BODY.format(
         first_name=first_name or "there",
         opener=opener.strip(),
+        product=PRODUCT,
+        closing=CLOSINGS[_variant(key, len(CLOSINGS))],
         sender_name=SENDER_NAME,
         sender_title=SENDER_TITLE,
         sender_site=SENDER_SITE,
         opt_out=OPT_OUT,
     )
-    return SUBJECT, body
+    return SUBJECTS[_variant(key, len(SUBJECTS))], body
 
 
 def render_followup(first_name: str) -> str:

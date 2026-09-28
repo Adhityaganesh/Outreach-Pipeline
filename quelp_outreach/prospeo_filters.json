@@ -1,7 +1,7 @@
 {
   "_about": "ICP: sales leaders, AEs and SEs at 21-200 person B2B software companies in India. Keys starting with _ are notes and are not sent.",
   "_values": "Location and industry strings must match Prospeo's own vocabulary exactly. Get valid values free from the Search Suggestions API: POST https://api.prospeo.io/search-suggestions with {\"location_search\": \"...\"} or {\"industry_search\": \"...\"}.",
-  "_widen": "Too few results? Drop company_industry first, then raise max_person_per_company, then add \"201-500\" to the headcount range.",
+  "_widen": "Too few results? Raise max_person_per_company to 3, then add \"201-500\" to the headcount range. Adding back \"IT Services and IT Consulting\" widens a lot but fills the list with services firms and system integrators, not SaaS sales teams.",
   "person_job_title": {
     "include": [
       "Head of Sales",
@@ -18,21 +18,30 @@
       "Solutions Consultant",
       "Presales"
     ],
-    "exclude": ["Intern", "Assistant", "Recruiter"],
+    "exclude": [
+      "Intern",
+      "Assistant",
+      "Recruiter"
+    ],
     "match_mode": "CONTAINS"
   },
   "company_location_search": {
-    "include": ["India"]
+    "include": [
+      "India"
+    ]
   },
   "company_industry": {
     "include": [
       "Software Development",
-      "IT Services and IT Consulting",
       "Technology, Information and Internet",
       "Data Infrastructure and Analytics",
       "Internet Marketplace Platforms"
     ]
   },
-  "company_headcount_range": ["21-50", "51-100", "101-200"],
+  "company_headcount_range": [
+    "21-50",
+    "51-100",
+    "101-200"
+  ],
   "max_person_per_company": 2
 }
