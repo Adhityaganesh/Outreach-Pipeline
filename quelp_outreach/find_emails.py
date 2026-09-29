@@ -260,9 +260,15 @@ def save_found(found: list[dict]) -> int:
     return len(merged) - len(old)
 
 
-def _verify_batch(people, co, mem, order, args, contacted, suppressed):
-    """Verify one batch of people. Returns (found rows, reasons). Raises StopRun."""
-    found, reasons = [], {}
+def _verify_batch(people, co, mem, order, args, contacted, suppressed,
+                  found, reasons):
+    """
+    Verify one batch of people, appending to the caller's `found` and `reasons`.
+
+    They are caller-owned on purpose: StopRun (credit cap, out of credits) can
+    fire part-way through, and leads already verified must survive it —
+    otherwise the run discards work the credits were already spent on.
+    """
     todo = []
     for _, r in people.iterrows():
         row = r.to_dict()
@@ -297,7 +303,6 @@ def _verify_batch(people, co, mem, order, args, contacted, suppressed):
             })
         else:
             reasons[why] = reasons.get(why, 0) + 1
-    return found, reasons
 
 
 def run(args) -> None:
@@ -318,7 +323,8 @@ def run(args) -> None:
     # Yield per page varies a lot (overlap with people already contacted,
     # catch-all domains, unguessable addresses), so a fixed page count cannot
     # deliver a fixed number of leads.
-    targeting = bool(args.target) and args.prospeo
+    # getattr: run() is also called directly, not only from the CLI parser.
+    targeting = bool(getattr(args, "target", 0)) and args.prospeo
     if not targeting:
         people = load_people(args)
         if people.empty:
@@ -331,8 +337,8 @@ def run(args) -> None:
         print(f"Clearout balance: {co.credits()}\n")
         found, reasons = [], {}
         try:
-            found, reasons = _verify_batch(people, co, mem, order, args,
-                                           contacted, suppressed)
+            _verify_batch(people, co, mem, order, args, contacted, suppressed,
+                          found, reasons)
         except StopRun as e:
             print(f"\nStopped: {e}")
         finally:
@@ -348,7 +354,7 @@ def run(args) -> None:
     found, reasons, page = [], {}, args.start_page
     pages_used = 0
     try:
-        while len(found) < args.target and pages_used < args.max_pages:
+        while len(found) < args.target and pages_used < getattr(args, "max_pages", 12):
             data, paid = prospeo.search_page(filters, page)
             results = data.get("results") or []
             total_pages = (data.get("pagination") or {}).get("total_page") or 0
@@ -360,10 +366,8 @@ def run(args) -> None:
                 break
             batch = pd.DataFrame([prospeo.to_row(r) for r in results]).fillna("")
             _remember_people(batch)
-            got, why = _verify_batch(batch, co, mem, order, args, contacted, suppressed)
-            found.extend(got)
-            for k, v in why.items():
-                reasons[k] = reasons.get(k, 0) + v
+            _verify_batch(batch, co, mem, order, args, contacted, suppressed,
+                          found, reasons)
             page += 1
             if total_pages and page > total_pages:
                 print("  reached the last page of results")
