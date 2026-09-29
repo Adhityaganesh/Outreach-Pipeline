@@ -260,6 +260,46 @@ def save_found(found: list[dict]) -> int:
     return len(merged) - len(old)
 
 
+def _verify_batch(people, co, mem, order, args, contacted, suppressed):
+    """Verify one batch of people. Returns (found rows, reasons). Raises StopRun."""
+    found, reasons = [], {}
+    todo = []
+    for _, r in people.iterrows():
+        row = r.to_dict()
+        why, cands = free_checks(row, mem, suppressed, contacted, order, args.max_guesses)
+        if why:
+            reasons[why] = reasons.get(why, 0) + 1
+        else:
+            todo.append(row)
+
+    print(f"  to verify: {len(todo)}  |  skipped free: {len(people) - len(todo)}")
+    for i, row in enumerate(todo, 1):
+        domain = _clean_domain(row.get("domain"))
+        # Re-plan with what this run has learned: a colleague may have revealed
+        # the domain's pattern, or shown that it is catch-all.
+        why, cands = free_checks(row, mem, suppressed, contacted, order, args.max_guesses)
+        if why:
+            reasons[why] = reasons.get(why, 0) + 1
+            continue
+        print(f"[{i}/{len(todo)}] {row.get('first_name')} {row.get('last_name')} — "
+              f"{row.get('title', '')} @ {row.get('company') or domain}")
+        email, source, why = find_one(row, cands, co, mem, args.finder)
+        if email:
+            contacted.add(email)          # do not re-verify within this run
+            found.append({
+                "email": email, "first_name": row.get("first_name", ""),
+                "last_name": row.get("last_name", ""), "company": row.get("company", ""),
+                "title": row.get("title", ""), "industry": row.get("industry", ""),
+                "domain": domain, "employees": row.get("employees", ""),
+                "linkedin": row.get("linkedin", ""), "email_status": "valid",
+                "source": source,
+                "found_at": datetime.now(timezone.utc).isoformat(),
+            })
+        else:
+            reasons[why] = reasons.get(why, 0) + 1
+    return found, reasons
+
+
 def run(args) -> None:
     order = [p.strip() for p in args.patterns.split(",") if p.strip()]
     bad = [p for p in order if p not in _PATTERNS]
@@ -270,80 +310,109 @@ def run(args) -> None:
         _plan_prospeo(args)
         return
 
-    people = load_people(args)
-    if people.empty:
-        print("No people to process.")
-        return
-
     mem = DomainMemory()
     suppressed = load_suppressed()
     contacted = contacted_emails()
 
-    # Pass 1 — free checks for everyone
-    todo, skipped = [], {}
-    for _, r in people.iterrows():
-        row = r.to_dict()
-        why, cands = free_checks(row, mem, suppressed, contacted, order, args.max_guesses)
-        if why:
-            skipped[why] = skipped.get(why, 0) + 1
-        else:
-            todo.append((row, cands))
-
-    worst = sum(len(c) for _, c in todo) * VERIFY_COST + (len(todo) * FINDER_COST if args.finder else 0)
-    print(f"People: {len(people)}  |  to verify: {len(todo)}  |  skipped free: {len(people) - len(todo)}")
-    for why, n in sorted(skipped.items(), key=lambda x: -x[1]):
-        print(f"  skip {n:>3}: {why}")
-    print(f"Clearout worst case: {worst} credits (usually far less — stops at first valid, "
-          f"cached results are free)  |  cap this run: {args.max_credits}\n")
-
-    if not args.live:
-        for row, cands in todo[:10]:
-            print(f"  {row.get('first_name')} {row.get('last_name')} @ {_clean_domain(row.get('domain'))}: "
-                  + ", ".join(e for _, e in cands))
-        print("\nPlan only — no credits spent. Add --live to verify.")
+    # --target: keep pulling Prospeo pages until N verified emails are found.
+    # Yield per page varies a lot (overlap with people already contacted,
+    # catch-all domains, unguessable addresses), so a fixed page count cannot
+    # deliver a fixed number of leads.
+    targeting = bool(args.target) and args.prospeo
+    if not targeting:
+        people = load_people(args)
+        if people.empty:
+            print("No people to process.")
+            return
+        if not args.live:
+            _dry_preview(people, mem, suppressed, contacted, order, args)
+            return
+        co = Clearout(args.max_credits)
+        print(f"Clearout balance: {co.credits()}\n")
+        found, reasons = [], {}
+        try:
+            found, reasons = _verify_batch(people, co, mem, order, args,
+                                           contacted, suppressed)
+        except StopRun as e:
+            print(f"\nStopped: {e}")
+        finally:
+            _report(found, reasons, co)
         return
 
+    import prospeo
+    filters = prospeo.load_filters(Path(args.filters))
     co = Clearout(args.max_credits)
-    print(f"Clearout balance: {co.credits()}\n")
+    print(f"Target: {args.target} verified emails  |  Clearout balance: {co.credits()}  "
+          f"|  cap {args.max_credits} credits, {args.max_pages} pages\n")
 
-    found, reasons = [], {}
+    found, reasons, page = [], {}, args.start_page
+    pages_used = 0
     try:
-        for i, (row, _) in enumerate(todo, 1):
-            domain = _clean_domain(row.get("domain"))
-            # Re-plan with what this run has learned so far: a colleague may
-            # have revealed the domain's pattern, or that it's catch-all.
-            why, cands = free_checks(row, mem, suppressed, contacted, order, args.max_guesses)
-            if why:
-                reasons[why] = reasons.get(why, 0) + 1
-                continue
-            print(f"[{i}/{len(todo)}] {row.get('first_name')} {row.get('last_name')} — "
-                  f"{row.get('title', '')} @ {row.get('company') or domain}")
-            email, source, why = find_one(row, cands, co, mem, args.finder)
-            if email:
-                found.append({
-                    "email": email, "first_name": row.get("first_name", ""),
-                    "last_name": row.get("last_name", ""), "company": row.get("company", ""),
-                    "title": row.get("title", ""), "industry": row.get("industry", ""),
-                    "domain": domain, "employees": row.get("employees", ""),
-                    "linkedin": row.get("linkedin", ""), "email_status": "valid",
-                    "source": source,
-                    "found_at": datetime.now(timezone.utc).isoformat(),
-                })
-            else:
-                reasons[why] = reasons.get(why, 0) + 1
+        while len(found) < args.target and pages_used < args.max_pages:
+            data, paid = prospeo.search_page(filters, page)
+            results = data.get("results") or []
+            total_pages = (data.get("pagination") or {}).get("total_page") or 0
+            pages_used += 1
+            print(f"Prospeo page {page}: {len(results)} people"
+                  f"{'' if paid else ' (free)'}  [{len(found)}/{args.target} found]")
+            if not results:
+                print("  no more results — stopping")
+                break
+            batch = pd.DataFrame([prospeo.to_row(r) for r in results]).fillna("")
+            _remember_people(batch)
+            got, why = _verify_batch(batch, co, mem, order, args, contacted, suppressed)
+            found.extend(got)
+            for k, v in why.items():
+                reasons[k] = reasons.get(k, 0) + v
+            page += 1
+            if total_pages and page > total_pages:
+                print("  reached the last page of results")
+                break
     except StopRun as e:
         print(f"\nStopped: {e}")
     finally:
-        added = save_found(found)
-        print("\n" + "=" * 65)
-        print(f"Found: {len(found)}  (new in {_OUT.name}: {added})  |  "
-              f"Clearout credits spent: {co.spent}"
-              + (f"  |  {co.spent / len(found):.1f} per email" if found else ""))
-        for why, n in sorted(reasons.items(), key=lambda x: -x[1]):
-            print(f"  not found {n:>3}: {why}")
-        print(f"Clearout balance now: {co.credits()}")
-        if found:
-            print(f"\nNext: python list_send.py --in data/{_OUT.name}")
+        _report(found, reasons, co, target=args.target, next_page=page)
+
+
+def _remember_people(df) -> None:
+    if df.empty:
+        return
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    old = pd.read_csv(_PEOPLE, dtype=str).fillna("") if _PEOPLE.exists() else pd.DataFrame()
+    pd.concat([old, df.astype(str)]).drop_duplicates(
+        subset=["full_name", "domain"], keep="last").to_csv(_PEOPLE, index=False)
+
+
+def _dry_preview(people, mem, suppressed, contacted, order, args) -> None:
+    todo = []
+    for _, r in people.iterrows():
+        row = r.to_dict()
+        why, cands = free_checks(row, mem, suppressed, contacted, order, args.max_guesses)
+        if not why:
+            todo.append((row, cands))
+    worst = sum(len(c) for _, c in todo) * VERIFY_COST
+    print(f"People: {len(people)}  |  to verify: {len(todo)}")
+    print(f"Clearout worst case: {worst} credits  |  cap: {args.max_credits}\n")
+    for row, cands in todo[:10]:
+        print(f"  {row.get('first_name')} {row.get('last_name')} @ "
+              f"{_clean_domain(row.get('domain'))}: " + ", ".join(e for _, e in cands))
+    print("\nPlan only — no credits spent. Add --live to verify.")
+
+
+def _report(found, reasons, co, target=None, next_page=None) -> None:
+    added = save_found(found)
+    print("\n" + "=" * 65)
+    hit = "" if target is None else f" / {target} target"
+    print(f"Found: {len(found)}{hit}  (new in {_OUT.name}: {added})  |  "
+          f"Clearout credits spent: {co.spent}"
+          + (f"  |  {co.spent / len(found):.1f} per email" if found else ""))
+    for why, n in sorted(reasons.items(), key=lambda x: -x[1]):
+        print(f"  not found {n:>3}: {why}")
+    print(f"Clearout balance now: {co.credits()}")
+    if next_page is not None:
+        print(f"Next Prospeo page: {next_page}")
+    if found:
+        print(f"\nNext: python list_send.py --in data/{_OUT.name}")
 
 
 def _plan_prospeo(args) -> None:
@@ -386,6 +455,11 @@ def main() -> None:
     src.add_argument("--in", dest="infile", metavar="CSV", help="CSV with names + company domains")
     src.add_argument("--test", action="store_true", help="Free Clearout test-address check")
     p.add_argument("--pages", type=int, default=1, help="Prospeo pages, 1 credit each (default 1)")
+    p.add_argument("--target", type=int, default=0, metavar="N",
+                   help="Keep pulling Prospeo pages until N verified emails are found. "
+                        "Page yield varies, so a page count cannot deliver a fixed number.")
+    p.add_argument("--max-pages", type=int, default=12,
+                   help="Hard stop on pages per --target run (default 12)")
     p.add_argument("--start-page", type=int, default=1, help="Prospeo page to start from")
     p.add_argument("--filters", default=str(_FILTERS), help="Prospeo filters JSON")
     p.add_argument("--live", action="store_true", help="Actually spend credits")

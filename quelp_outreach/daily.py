@@ -32,6 +32,7 @@ SAFETY: this sends real email with no human confirmation. What limits it:
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -100,8 +101,10 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true", help="Show the plan, send nothing")
     p.add_argument("--min-queue", type=int, default=10,
                    help="Top up leads when fewer than this remain unsent (default 10)")
-    p.add_argument("--max-pages", type=int, default=1,
-                   help="Prospeo pages per top-up, 1 credit each (default 1)")
+    p.add_argument("--lead-target", type=int, default=0, metavar="N",
+                   help="Top the queue up to N leads (default: two days of send capacity)")
+    p.add_argument("--max-pages", type=int, default=12,
+                   help="Hard stop on Prospeo pages per top-up, 1 credit each (default 12)")
     p.add_argument("--max-credits", type=int, default=CLEAROUT_CREDIT_CAP,
                    help=f"Clearout credit cap per top-up (default {CLEAROUT_CREDIT_CAP})")
     p.add_argument("--no-topup", action="store_true", help="Never fetch new leads")
@@ -123,6 +126,8 @@ def main() -> None:
         return
 
     inboxes = configured()
+    if not a.lead_target:
+        a.lead_target = sum(ib.cap for ib in inboxes) * 2
     if a.status:
         print(f"Paused        : {'YES' if _PAUSED.exists() else 'no'}")
         print(f"Queue         : {queue_depth()} leads unsent")
@@ -157,17 +162,22 @@ def main() -> None:
         print(f"\n2/3  TOP UP — not needed. Queue {depth} >= {a.min_queue}")
     else:
         page = int(state.get("next_prospeo_page", 1))
+        # Fetch enough for the buffer, not a fixed page count: yield per page
+        # swings with overlap, catch-all domains and unguessable addresses.
+        want = max(0, a.lead_target - depth)
         ok, out = run_step(
-            f"2/3  TOP UP (queue {depth} < {a.min_queue}, Prospeo page {page})",
+            f"2/3  TOP UP (queue {depth} < {a.min_queue}, want {want} more, "
+            f"from Prospeo page {page})",
             [sys.executable, "find_emails.py", "--prospeo", "--live",
-             "--pages", str(a.max_pages), "--start-page", str(page),
-             "--max-credits", str(a.max_credits)],
+             "--target", str(want), "--start-page", str(page),
+             "--max-pages", str(a.max_pages), "--max-credits", str(a.max_credits)],
             a.dry_run)
         if not a.dry_run:
             topped_up = ok
-            # Advance regardless of yield: a page whose people were all
-            # unusable would otherwise be refetched forever.
-            state["next_prospeo_page"] = page + a.max_pages
+            # find_emails reports where it stopped; advance past it so a page
+            # that yielded nothing is never refetched.
+            m = re.search(r"Next Prospeo page:\s*(\d+)", out or "")
+            state["next_prospeo_page"] = int(m.group(1)) if m else page + a.max_pages
 
     # 3. Send.
     if not _LEADS.exists():
